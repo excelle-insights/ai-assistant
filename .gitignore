@@ -1,0 +1,7 @@
+/vendor/
+/phinxlog_ai_whatsapp
+/.env
+composer.lock
+.idea/
+.vscode/
+*.log
