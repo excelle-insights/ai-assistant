@@ -1,30 +1,39 @@
 <?php
-
 declare(strict_types=1);
 
-namespace ExcelleInsights\AiWhatsapp\Support;
+namespace ExcelleInsights\AiWhatsApp\Support;
+
+use Dotenv\Dotenv;
 
 final class EnvLoader
 {
-    public static function load(?string $envRoot = null): void
+    private static bool $loaded = false;
+
+    public static function load(?string $rootPath = null): void
     {
-        $roots = [
-            $envRoot,
-            dirname(__DIR__, 5) . '/api', // host maintaina/api/.env when package is vendor
-            dirname(__DIR__, 3), // package root
-        ];
-        foreach ($roots as $root) {
-            if (!$root || !is_dir($root)) continue;
-            $file = rtrim($root, '/') . '/.env';
-            if (!file_exists($file)) continue;
-            foreach (file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
-                if (str_starts_with(trim($line), '#') || !str_contains($line, '=')) continue;
-                [$k, $v] = explode('=', $line, 2);
-                $k = trim($k); $v = trim($v);
-                if (!isset($_ENV[$k])) $_ENV[$k] = $v;
-                if (getenv($k) === false) putenv("$k=$v");
-            }
-            break;
+        if (self::$loaded) {
+            return;
+        }
+
+        if ($rootPath && file_exists($rootPath . '/.env')) {
+            Dotenv::createImmutable($rootPath)->safeLoad();
+            self::$loaded = true;
+            return;
+        }
+
+        $vendorDir = dirname(__DIR__, 4);
+        $projectRoot = dirname($vendorDir);
+
+        if (file_exists($projectRoot . '/.env')) {
+            Dotenv::createImmutable($projectRoot)->safeLoad();
+            self::$loaded = true;
+            return;
+        }
+
+        $packageEnv = dirname(__DIR__, 2) . '/.env';
+        if (file_exists($packageEnv)) {
+            Dotenv::createImmutable(dirname(__DIR__, 2))->safeLoad();
+            self::$loaded = true;
         }
     }
 }
