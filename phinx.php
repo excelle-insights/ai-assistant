@@ -1,39 +1,58 @@
 <?php
 
-foreach ([__DIR__ . '/../../api/.env', __DIR__ . '/.env', __DIR__ . '/../maintaina/api/.env'] as $envFile) {
-    if (file_exists($envFile)) {
-        foreach (file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
-            if (str_starts_with(trim($line), '#') || !str_contains($line, '=')) continue;
-            [$key, $value] = explode('=', $line, 2);
-            $_ENV[trim($key)] = trim($value);
-        }
-        break;
+declare(strict_types=1);
+
+use ExcelleInsights\AiWhatsapp\Support\EnvLoader;
+
+$dir = __DIR__;
+while (!file_exists($dir . '/vendor/autoload.php')) {
+    $parent = dirname($dir);
+    if ($parent === $dir) {
+        fwrite(STDERR, "Unable to find vendor/autoload.php\n");
+        exit(1);
     }
+    $dir = $parent;
 }
 
-$prefix = $_ENV['AI_WHATSAPP_TABLE_PREFIX'] ?? 'ai_whatsapp';
+require_once $dir . '/vendor/autoload.php';
 
-$db = [
-    'adapter' => $_ENV['DB_DRIVER'] ?? 'mysql',
-    'host'    => $_ENV['DB_HOST'] ?? 'localhost',
-    'name'    => $_ENV['DB_NAME'] ?? 'maintaina',
-    'user'    => $_ENV['DB_USER'] ?? 'root',
-    'pass'    => $_ENV['DB_PASSWORD'] ?? '',
-    'port'    => $_ENV['DB_PORT'] ?? '3306',
-    'charset' => $_ENV['DB_CHARSET'] ?? 'utf8mb4',
-];
+EnvLoader::load(__DIR__);
 
 return [
     'paths' => [
         'migrations' => '%%PHINX_CONFIG_DIR%%/database/migrations',
-        'seeds'      => '%%PHINX_CONFIG_DIR%%/db/seeds',
+        'seeds' => '%%PHINX_CONFIG_DIR%%/db/seeds',
     ],
     'environments' => [
-        'default_migration_table' => 'phinxlog_ai_whatsapp',
-        'default_environment'     => $_ENV['APP_ENV'] ?? 'development',
-        'production'              => $db,
-        'development'             => $db,
-        'testing'                 => $db,
+        'default_migration_table' => 'phinxlog',
+        'default_environment' => 'development',
+        'production' => [
+            'adapter' => 'mysql',
+            'host' => $_ENV['DB_HOST'] ?? 'localhost',
+            'name' => $_ENV['DB_NAME'] ?? 'production_db',
+            'user' => $_ENV['DB_USER'] ?? 'root',
+            'pass' => $_ENV['DB_PASSWORD'] ?? '',
+            'port' => '3306',
+            'charset' => 'utf8mb4',
+        ],
+        'development' => [
+            'adapter' => 'mysql',
+            'host' => $_ENV['DB_HOST'] ?? 'localhost',
+            'name' => $_ENV['DB_NAME'] ?? 'development_db',
+            'user' => $_ENV['DB_USER'] ?? 'root',
+            'pass' => $_ENV['DB_PASSWORD'] ?? '',
+            'port' => '3306',
+            'charset' => 'utf8mb4',
+        ],
+        'testing' => [
+            'adapter' => 'mysql',
+            'host' => $_ENV['DB_HOST'] ?? 'localhost',
+            'name' => $_ENV['DB_NAME'] ?? 'testing_db',
+            'user' => $_ENV['DB_USER'] ?? 'root',
+            'pass' => $_ENV['DB_PASSWORD'] ?? '',
+            'port' => '3306',
+            'charset' => 'utf8mb4',
+        ],
     ],
     'version_order' => 'creation',
 ];
