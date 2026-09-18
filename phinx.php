@@ -18,6 +18,11 @@ require_once $dir . '/vendor/autoload.php';
 
 EnvLoader::load(__DIR__);
 
+if (!isset($_ENV['DB_HOST'], $_ENV['DB_NAME'], $_ENV['DB_USER'], $_ENV['DB_PASSWORD'])) {
+    fwrite(STDERR, "Database environment variables are not set. Please check your .env file.\n");
+    exit(1);
+}
+
 return [
     'paths' => [
         'migrations' => '%%PHINX_CONFIG_DIR%%/database/migrations',
