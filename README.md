@@ -27,6 +27,17 @@ No edits to `vendor/excelle-insights/whatsapp` required.
   OPENAI_REQUEST_TIMEOUT=30
   AI_RATE_LIMIT_PER_HOUR=60
   ```
+* Host `.env` AI WhatsApp auto-reply:
+  ```
+  # Toggle AI auto-reply for inbound WhatsApp messages. false/0 disables.
+  AI_WHATSAPP_AUTO_REPLY=true
+  # Table prefix for ai_whatsapp_knowledge / _sessions / _queue.
+  AI_WHATSAPP_TABLE_PREFIX=ai_whatsapp
+  # Optional fallback template id to queue when the 24h session window is closed.
+  # 0 = try direct send anyway (will fail if window closed). Set to an Approved
+  # whatsapp_templates.template_id to queue a template instead.
+  AI_WHATSAPP_FALLBACK_TEMPLATE=0
+  ```
 
 ---
 
@@ -91,7 +102,7 @@ if (class_exists(\ExcelleInsights\AiWhatsapp\Facade\AiWhatsappManager::class)) {
 // api/src/Services/MaintainaContextProvider.php
 use ExcelleInsights\AiWhatsapp\Contracts\SystemContextProviderInterface;
 
-class MaintainacContextProvider implements SystemContextProviderInterface {
+class MaintainaContextProvider implements SystemContextProviderInterface {
   public function getCompanyContext(int $companyId): array {
     $db = \ExcelleCore\Core\Database::getInstance()->getConnection();
     $row = $db->query("SELECT name FROM companies WHERE id=$companyId")->fetch();
@@ -108,7 +119,7 @@ Pass to manager:
 ```php
 $ai = new \ExcelleInsights\AiWhatsapp\Facade\AiWhatsappManager(
   pdo: \ExcelleCore\Core\Database::getInstance()->getConnection(),
-  contextProvider: new MaintainacContextProvider(),
+  contextProvider: new MaintainaContextProvider(),
   openAI: new \ExcelleCore\AI\OpenAIClient() // reuse host's, or null to use package's fallback
 );
 ```
@@ -151,8 +162,9 @@ return [
     'timeout' => $_ENV['OPENAI_REQUEST_TIMEOUT'] ?? 30,
   ],
   'auto_reply' => [
-    'enabled' => $_ENV['AI_WHATSAPP_AUTO_REPLY'] ?? true,
+    'enabled' => ($_ENV['AI_WHATSAPP_AUTO_REPLY'] ?? 'true') !== 'false',
     'outside_session_use_template' => true, // 24h window → queue template
+    'fallback_template_id' => (int)($_ENV['AI_WHATSAPP_FALLBACK_TEMPLATE'] ?? 0),
   ],
 ];
 ```
