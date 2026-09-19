@@ -43,27 +43,28 @@ class AiWhatsappService
      */
     public function onInboundMessages(array $results): void
     {
+        error_log('[ai-whatsapp] onInboundMessages called with ' . count($results) . ' results');
         foreach ($results as $r) {
             if (($r['type'] ?? '') !== 'message') continue;
             $convId = (int)($r['conversation_id'] ?? 0);
             $waMsgId = $r['wa_message_id'] ?? '';
-            if (!$convId || !$waMsgId) continue;
-            try { $this->onInboundMessage($convId, $waMsgId); } catch (\Throwable $e) { error_log('AiWhatsapp onInboundMessage failed conv '.$convId.': '.$e->getMessage()); }
+            if (!$convId || !$waMsgId) { error_log('[ai-whatsapp] skipping result missing convId/waMsgId: ' . json_encode($r)); continue; }
+            try { $this->onInboundMessage($convId, $waMsgId); } catch (\Throwable $e) { error_log('[ai-whatsapp] onInboundMessage FAILED conv ' . $convId . ': ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine()); }
         }
     }
 
     public function onInboundMessage(int $conversationId, string $waMessageId): void
     {
         $autoEnabled = $_ENV['AI_WHATSAPP_AUTO_REPLY'] ?? 'true';
-        if ($autoEnabled === 'false' || $autoEnabled === '0') return;
+        if ($autoEnabled === 'false' || $autoEnabled === '0') { error_log('[ai-whatsapp] auto reply disabled (AI_WHATSAPP_AUTO_REPLY=' . $autoEnabled . ')'); return; }
 
         // Load conversation + last inbound
         $stmt = $this->pdo->prepare("SELECT * FROM {$this->waPrefix}_conversations WHERE conversation_id = :cid LIMIT 1");
         $stmt->execute(['cid' => $conversationId]);
         $conv = $stmt->fetch(\PDO::FETCH_ASSOC);
-        if (!$conv) return;
+        if (!$conv) { error_log('[ai-whatsapp] conversation ' . $conversationId . ' not found'); return; }
 
-        if ($this->contextProvider && !$this->contextProvider->canAutoReply($conversationId)) return;
+        if ($this->contextProvider && !$this->contextProvider->canAutoReply($conversationId)) { error_log('[ai-whatsapp] canAutoReply=false for conv ' . $conversationId); return; }
 
         $stmt = $this->pdo->prepare("SELECT * FROM {$this->waPrefix}_messages WHERE wa_message_id = :wamid AND conversation_id = :cid LIMIT 1");
         $stmt->execute(['wamid' => $waMessageId, 'cid' => $conversationId]);
@@ -73,10 +74,11 @@ class AiWhatsappService
             $stmt->execute(['cid' => $conversationId]);
             $msg = $stmt->fetch(\PDO::FETCH_ASSOC);
         }
-        if (!$msg || ($msg['direction'] ?? '') !== 'inbound') return;
+        if (!$msg) { error_log('[ai-whatsapp] no message for conv ' . $conversationId . ' wamid=' . $waMessageId); return; }
+        if (($msg['direction'] ?? '') !== 'inbound') { error_log('[ai-whatsapp] message direction "' . ($msg['direction'] ?? 'null') . '" not inbound for conv ' . $conversationId); return; }
 
         $messageBody = trim((string)($msg['message_body'] ?? ''));
-        if ($messageBody === '') return;
+        if ($messageBody === '') { error_log('[ai-whatsapp] empty message body for conv ' . $conversationId); return; }
 
         // Resolve company_id via conversation or via context provider
         $companyId = (int)($conv['company_id'] ?? 0);
@@ -88,6 +90,7 @@ class AiWhatsappService
 
         // Knowledge + company context
         $chunks = $this->knowledge->search($companyId, $messageBody, 5);
+        error_log('[ai-whatsapp] companyId=' . $companyId . ' knowledgeChunks=' . count($chunks) . ' conv=' . $conversationId . ' body=' . substr($messageBody, 0, 80));
         $companyCtx = '';
         $customerCtx = '';
         if ($this->contextProvider) {
@@ -110,11 +113,12 @@ class AiWhatsappService
         $model = $_ENV['OPENAI_MODEL'] ?? 'gpt-4o';
         $res = $this->openAI->chat([['role'=>'system','content'=>$system],['role'=>'user','content'=>$user]], $model);
         $reply = trim((string)($res['content'] ?? ''));
-        if ($reply === '') return;
+        if ($reply === '') { error_log('[ai-whatsapp] OpenAI empty reply for conv ' . $conversationId); return; }
 
         // Enqueue or send directly — check 24h session
         $sessionExpires = $conv['session_expires_at'] ?? null;
         $inSession = $sessionExpires && strtotime($sessionExpires) > time();
+        error_log('[ai-whatsapp] inSession=' . var_export($inSession, true) . ' conv=' . $conversationId . ' reply=' . substr($reply, 0, 100));
 
         if ($inSession) {
             // Direct send via whatsapp API (host's WhatsappApi or direct Graph)
@@ -139,7 +143,8 @@ class AiWhatsappService
     {
         // Prefer host's WhatsappApi if available
         if (class_exists(\Packages\Integrations\Whatsapp\WhatsappApi::class)) {
-            \Packages\Integrations\Whatsapp\WhatsappApi::sendTextMessage($to, $body);
+            $res = \Packages\Integrations\Whatsapp\WhatsappApi::sendTextMessage($to, $body);
+            error_log('[ai-whatsapp] sendTextMessage to=' . $to . ' success=' . var_export($res['success'] ?? null, true) . ' http=' . ($res['http_code'] ?? '?') . ' err=' . substr(json_encode($res['error'] ?? $res['data'] ?? ''), 0, 300));
             // Also insert outbound message for UI (like WhatsappService::sendMessage)
             $now = date('Y-m-d H:i:s');
             $this->pdo->prepare("INSERT INTO {$this->waPrefix}_messages (conversation_id, direction, message_body, message_type, delivery_status, sent_at, author_id) VALUES (:cid, 'outbound', :body, 'text', 'sent', :now, 0)")
@@ -148,6 +153,7 @@ class AiWhatsappService
             return;
         }
         // Fallback: direct Graph call
+        error_log('[ai-whatsapp] WhatsappApi class not found, enqueueing to ai_whatsapp_queue instead');
         $this->pdo->prepare("INSERT INTO {$this->prefix}_queue (conversation_id, wa_message_id, status, payload, created_at) VALUES (:cid, :wamid, 'pending', :payload, NOW())")
             ->execute(['cid' => $conversationId, 'wamid' => uniqid('ai_'), 'payload' => json_encode(['to'=>$to,'body'=>$body])]);
     }
