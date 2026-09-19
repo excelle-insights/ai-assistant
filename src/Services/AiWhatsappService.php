@@ -49,22 +49,22 @@ class AiWhatsappService
             $convId = (int)($r['conversation_id'] ?? 0);
             $waMsgId = $r['wa_message_id'] ?? '';
             if (!$convId || !$waMsgId) { error_log('[ai-whatsapp] skipping result missing convId/waMsgId: ' . json_encode($r)); continue; }
-            try { $this->onInboundMessage($convId, $waMsgId); } catch (\Throwable $e) { error_log('[ai-whatsapp] onInboundMessage FAILED conv ' . $convId . ': ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine()); }
+            try { $this->onInboundMessage($convId, $waMsgId); } catch (\Throwable $e) { error_log('[ai-whatsapp] onInboundMessage FAILED conv ' . $convId . ': ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine()); $this->markStatus($convId, $waMsgId, 'failed', $e->getMessage()); }
         }
     }
 
     public function onInboundMessage(int $conversationId, string $waMessageId): void
     {
         $autoEnabled = $_ENV['AI_WHATSAPP_AUTO_REPLY'] ?? 'true';
-        if ($autoEnabled === 'false' || $autoEnabled === '0') { error_log('[ai-whatsapp] auto reply disabled (AI_WHATSAPP_AUTO_REPLY=' . $autoEnabled . ')'); return; }
+        if ($autoEnabled === 'false' || $autoEnabled === '0') { error_log('[ai-whatsapp] auto reply disabled (AI_WHATSAPP_AUTO_REPLY=' . $autoEnabled . ')'); $this->markStatus($conversationId, $waMessageId, 'disabled', 'Auto-reply is turned off (AI_WHATSAPP_AUTO_REPLY=' . $autoEnabled . ')'); return; }
 
         // Load conversation + last inbound
         $stmt = $this->pdo->prepare("SELECT * FROM {$this->waPrefix}_conversations WHERE conversation_id = :cid LIMIT 1");
         $stmt->execute(['cid' => $conversationId]);
         $conv = $stmt->fetch(\PDO::FETCH_ASSOC);
-        if (!$conv) { error_log('[ai-whatsapp] conversation ' . $conversationId . ' not found'); return; }
+        if (!$conv) { error_log('[ai-whatsapp] conversation ' . $conversationId . ' not found'); $this->markStatus($conversationId, $waMessageId, 'failed', 'Conversation record not found'); return; }
 
-        if ($this->contextProvider && !$this->contextProvider->canAutoReply($conversationId)) { error_log('[ai-whatsapp] canAutoReply=false for conv ' . $conversationId); return; }
+        if ($this->contextProvider && !$this->contextProvider->canAutoReply($conversationId)) { error_log('[ai-whatsapp] canAutoReply=false for conv ' . $conversationId); $this->markStatus($conversationId, $waMessageId, 'failed', 'Business rules blocked auto-reply (canAutoReply=false)'); return; }
 
         $stmt = $this->pdo->prepare("SELECT * FROM {$this->waPrefix}_messages WHERE wa_message_id = :wamid AND conversation_id = :cid LIMIT 1");
         $stmt->execute(['wamid' => $waMessageId, 'cid' => $conversationId]);
@@ -74,11 +74,11 @@ class AiWhatsappService
             $stmt->execute(['cid' => $conversationId]);
             $msg = $stmt->fetch(\PDO::FETCH_ASSOC);
         }
-        if (!$msg) { error_log('[ai-whatsapp] no message for conv ' . $conversationId . ' wamid=' . $waMessageId); return; }
-        if (($msg['direction'] ?? '') !== 'inbound') { error_log('[ai-whatsapp] message direction "' . ($msg['direction'] ?? 'null') . '" not inbound for conv ' . $conversationId); return; }
+        if (!$msg) { error_log('[ai-whatsapp] no message for conv ' . $conversationId . ' wamid=' . $waMessageId); $this->markStatus($conversationId, $waMessageId, 'failed', 'Inbound message not found'); return; }
+        if (($msg['direction'] ?? '') !== 'inbound') { error_log('[ai-whatsapp] message direction "' . ($msg['direction'] ?? 'null') . '" not inbound for conv ' . $conversationId); $this->markStatus($conversationId, $waMessageId, 'failed', 'Message is not inbound'); return; }
 
         $messageBody = trim((string)($msg['message_body'] ?? ''));
-        if ($messageBody === '') { error_log('[ai-whatsapp] empty message body for conv ' . $conversationId); return; }
+        if ($messageBody === '') { error_log('[ai-whatsapp] empty message body for conv ' . $conversationId); $this->markStatus($conversationId, $waMessageId, 'failed', 'Message had no text (media with no caption)'); return; }
 
         // Resolve company_id via conversation or via context provider
         $companyId = (int)($conv['company_id'] ?? 0);
@@ -107,55 +107,79 @@ class AiWhatsappService
 
         if (!$this->openAI) {
             error_log('AiWhatsapp: OpenAI not configured, skipping reply');
+            $this->markStatus($conversationId, $waMessageId, 'failed', 'OpenAI is not configured (OPENAI_API_KEY missing or invalid)');
             return;
         }
 
         $model = $_ENV['OPENAI_MODEL'] ?? 'gpt-4o';
         $res = $this->openAI->chat([['role'=>'system','content'=>$system],['role'=>'user','content'=>$user]], $model);
         $reply = trim((string)($res['content'] ?? ''));
-        if ($reply === '') { error_log('[ai-whatsapp] OpenAI empty reply for conv ' . $conversationId); return; }
+        if ($reply === '') { error_log('[ai-whatsapp] OpenAI empty reply for conv ' . $conversationId); $this->markStatus($conversationId, $waMessageId, 'failed', 'AI returned an empty response'); return; }
 
         // Enqueue or send directly — check 24h session
         $sessionExpires = $conv['session_expires_at'] ?? null;
         $inSession = $sessionExpires && strtotime($sessionExpires) > time();
         error_log('[ai-whatsapp] inSession=' . var_export($inSession, true) . ' conv=' . $conversationId . ' reply=' . substr($reply, 0, 100));
 
+        $sentOk = false;
+        $sendError = null;
         if ($inSession) {
             // Direct send via whatsapp API (host's WhatsappApi or direct Graph)
-            $this->sendText($conversationId, $conv['contact_phone'], $reply);
+            [$sentOk, $sendError] = $this->sendText($conversationId, $conv['contact_phone'], $reply);
         } else {
             // Outside session → queue template fallback if configured
             $tplId = (int)($_ENV['AI_WHATSAPP_FALLBACK_TEMPLATE'] ?? 0);
             if ($tplId) {
                 $this->pdo->prepare("INSERT INTO {$this->waPrefix}_queue (lead_id, contact_phone, contact_name, template_id, placeholders_data, status, author_id, created_at) VALUES (0, :phone, :name, :tid, :ph, 'pending', 0, NOW())")
                     ->execute(['phone' => $conv['contact_phone'], 'name' => $conv['contact_name'] ?? null, 'tid' => $tplId, 'ph' => json_encode([$reply])]);
+                $sentOk = true;
             } else {
                 // Still try direct — will fail if window closed, but log
-                $this->sendText($conversationId, $conv['contact_phone'], $reply);
+                [$sentOk, $sendError] = $this->sendText($conversationId, $conv['contact_phone'], $reply);
             }
+        }
+
+        if ($sentOk) {
+            $this->markStatus($conversationId, $waMessageId, 'sent', null);
+        } else {
+            $this->markStatus($conversationId, $waMessageId, 'send_failed', $sendError ?: 'Failed to send reply');
         }
 
         // Log session
         $this->storeSession($conversationId, $companyId, $messageBody, $reply);
     }
 
-    private function sendText(int $conversationId, string $to, string $body): void
+    private function sendText(int $conversationId, string $to, string $body): array
     {
         // Prefer host's WhatsappApi if available
         if (class_exists(\Packages\Integrations\Whatsapp\WhatsappApi::class)) {
             $res = \Packages\Integrations\Whatsapp\WhatsappApi::sendTextMessage($to, $body);
             error_log('[ai-whatsapp] sendTextMessage to=' . $to . ' success=' . var_export($res['success'] ?? null, true) . ' http=' . ($res['http_code'] ?? '?') . ' err=' . substr(json_encode($res['error'] ?? $res['data'] ?? ''), 0, 300));
-            // Also insert outbound message for UI (like WhatsappService::sendMessage)
             $now = date('Y-m-d H:i:s');
-            $this->pdo->prepare("INSERT INTO {$this->waPrefix}_messages (conversation_id, direction, message_body, message_type, delivery_status, sent_at, author_id) VALUES (:cid, 'outbound', :body, 'text', 'sent', :now, 0)")
-                ->execute(['cid' => $conversationId, 'body' => $body, 'now' => $now]);
+            $this->pdo->prepare("INSERT INTO {$this->waPrefix}_messages (conversation_id, direction, message_body, message_type, delivery_status, sent_at, author_id) VALUES (:cid, 'outbound', :body, 'text', :status, :now, 0)")
+                ->execute(['cid' => $conversationId, 'body' => $body, 'status' => ($res['success'] ?? false) ? 'sent' : 'failed', 'now' => $now]);
             $this->pdo->prepare("UPDATE {$this->waPrefix}_conversations SET last_message_at = :now WHERE conversation_id = :cid")->execute(['now' => $now, 'cid' => $conversationId]);
-            return;
+            if ($res['success'] ?? false) {
+                return [true, null];
+            }
+            $err = $res['error'] ?? (isset($res['data']['error']['message']) ? $res['data']['error']['message'] : json_encode($res['data'] ?? 'unknown error'));
+            return [false, $err];
         }
         // Fallback: direct Graph call
         error_log('[ai-whatsapp] WhatsappApi class not found, enqueueing to ai_whatsapp_queue instead');
         $this->pdo->prepare("INSERT INTO {$this->prefix}_queue (conversation_id, wa_message_id, status, payload, created_at) VALUES (:cid, :wamid, 'pending', :payload, NOW())")
             ->execute(['cid' => $conversationId, 'wamid' => uniqid('ai_'), 'payload' => json_encode(['to'=>$to,'body'=>$body])]);
+        return [true, null];
+    }
+
+    private function markStatus(int $conversationId, string $waMessageId, string $status, ?string $error): void
+    {
+        try {
+            $stmt = $this->pdo->prepare("UPDATE {$this->waPrefix}_messages SET ai_status = :s, ai_error = :e WHERE wa_message_id = :wamid AND conversation_id = :cid");
+            $stmt->execute(['s' => $status, 'e' => $error, 'wamid' => $waMessageId, 'cid' => $conversationId]);
+        } catch (\Throwable $e) {
+            error_log('[ai-whatsapp] markStatus failed: ' . $e->getMessage());
+        }
     }
 
     private function storeSession(int $conversationId, int $companyId, string $in, string $out): void
