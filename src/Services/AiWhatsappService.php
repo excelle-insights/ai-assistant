@@ -66,6 +66,19 @@ class AiWhatsappService
             return;
         }
 
+        // Idempotency: skip if this inbound wa_message_id was already auto-replied.
+        // The host webhook can be re-delivered (Meta retries when the synchronous
+        // reply is slow to ack), which would otherwise generate duplicate replies.
+        try {
+            $stmt = $this->pdo->prepare("SELECT id FROM {$this->waPrefix}_messages WHERE wa_message_id = :wamid AND ai_status IS NOT NULL AND ai_status != '' LIMIT 1");
+            $stmt->execute(['wamid' => $waMessageId]);
+            if ($stmt->fetchColumn()) {
+                return;
+            }
+        } catch (\Throwable $e) {
+            // ai_status column may not exist yet on un-migrated hosts — fall through.
+        }
+
         // Load conversation
         $stmt = $this->pdo->prepare("SELECT * FROM {$this->waPrefix}_conversations WHERE conversation_id = :cid LIMIT 1");
         $stmt->execute(['cid' => $conversationId]);
