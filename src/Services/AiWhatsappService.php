@@ -148,8 +148,21 @@ class AiWhatsappService
             return;
         }
 
+        // Conversation memory: carry forward previous turns from the same conversation
+        // so follow-ups like "radiator" resolve against what was already discussed.
+        $history = $this->loadSession($conversationId);
+        $messages = [['role' => 'system', 'content' => $system]];
+        foreach ($history as $turn) {
+            $role = $turn['role'] ?? '';
+            $content = trim((string)($turn['content'] ?? ''));
+            if (($role === 'user' || $role === 'assistant') && $content !== '') {
+                $messages[] = ['role' => $role, 'content' => $content];
+            }
+        }
+        $messages[] = ['role' => 'user', 'content' => $user];
+
         $model = $_ENV['OPENAI_MODEL'] ?? 'gpt-4o';
-        $res = $this->openAI->chat([['role' => 'system', 'content' => $system], ['role' => 'user', 'content' => $user]], $model);
+        $res = $this->openAI->chat($messages, $model);
         $reply = trim((string)($res['content'] ?? ''));
         if ($reply === '') {
             $this->markStatus($conversationId, $waMessageId, 'failed', 'AI returned an empty response');
@@ -216,12 +229,44 @@ class AiWhatsappService
         }
     }
 
+    /**
+     * Load the in-progress conversation history (previous user/assistant turns)
+     * for a conversation. Returns [] if none or the session has expired.
+     */
+    private function loadSession(int $conversationId): array
+    {
+        $table = $this->prefix . '_sessions';
+        try {
+            $stmt = $this->pdo->prepare("SELECT history_json FROM {$table} WHERE conversation_id = :cid AND expires_at > NOW() LIMIT 1");
+            $stmt->execute(['cid' => $conversationId]);
+            $json = $stmt->fetchColumn();
+        } catch (\Throwable $e) {
+            return [];
+        }
+        if (!$json) return [];
+        $decoded = json_decode((string)$json, true);
+        return is_array($decoded) ? $decoded : [];
+    }
+
     private function storeSession(int $conversationId, int $companyId, string $in, string $out): void
     {
         $table = $this->prefix . '_sessions';
-        $history = json_encode([['role' => 'user', 'content' => $in], ['role' => 'assistant', 'content' => $out]]);
+
+        // Append the latest exchange to the existing history rather than overwriting it.
+        $history = $this->loadSession($conversationId);
+        $history[] = ['role' => 'user', 'content' => $in];
+        $history[] = ['role' => 'assistant', 'content' => $out];
+
+        // Keep a bounded window so the prompt stays small (turn = user + assistant).
+        $maxTurns = (int)($_ENV['AI_WHATSAPP_SESSION_TURNS'] ?? 10);
+        if ($maxTurns < 1) $maxTurns = 10;
+        if (count($history) > $maxTurns * 2) {
+            $history = array_slice($history, -($maxTurns * 2));
+        }
+
+        $json = json_encode($history);
         $this->pdo->prepare("INSERT INTO {$table} (conversation_id, company_id, history_json, expires_at, created_at, updated_at) VALUES (:cid, :comp, :hist, DATE_ADD(NOW(), INTERVAL 1 HOUR), NOW(), NOW()) ON DUPLICATE KEY UPDATE history_json = :hist2, expires_at = DATE_ADD(NOW(), INTERVAL 1 HOUR), updated_at = NOW()")
-            ->execute(['cid' => $conversationId, 'comp' => $companyId, 'hist' => $history, 'hist2' => $history]);
+            ->execute(['cid' => $conversationId, 'comp' => $companyId, 'hist' => $json, 'hist2' => $json]);
     }
 
     private function saveTraining(int $companyId, string $question, string $answer): void
