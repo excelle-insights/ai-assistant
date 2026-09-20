@@ -24,22 +24,28 @@ class KnowledgeService
     public function search(int $companyId, string $query, int $k = 5): array
     {
         $table = $this->prefix . '_knowledge';
-        $like = '%' . $query . '%';
+        $words = $this->tokenize($query);
         $rows = [];
 
-        try {
-            $stmt = $this->pdo->prepare("SELECT category, title, content FROM {$table} WHERE company_id = :cid AND status='active' AND (title LIKE :q1 OR content LIKE :q2) ORDER BY updated_at DESC LIMIT :k");
-            $stmt->bindValue(':cid', $companyId, PDO::PARAM_INT);
-            $stmt->bindValue(':q1', $like);
-            $stmt->bindValue(':q2', $like);
-            $stmt->bindValue(':k', $k, PDO::PARAM_INT);
-            $stmt->execute();
-            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        } catch (\Throwable $e) {
-            return [];
+        if (!empty($words)) {
+            $clauses = [];
+            $params = [];
+            foreach ($words as $w) {
+                $clauses[] = '(title LIKE ? OR content LIKE ? OR category LIKE ?)';
+                $params[] = "%{$w}%"; $params[] = "%{$w}%"; $params[] = "%{$w}%";
+            }
+            $sql = "SELECT category, title, content FROM {$table} WHERE company_id = ? AND status='active' AND (" . implode(' OR ', $clauses) . ") ORDER BY updated_at DESC LIMIT " . (int)$k;
+            array_unshift($params, $companyId);
+            try {
+                $stmt = $this->pdo->prepare($sql);
+                $stmt->execute($params);
+                $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            } catch (\Throwable $e) {
+                $rows = [];
+            }
         }
 
-        // Fallback to latest active knowledge if no textual match
+        // Fallback to latest active knowledge if no match
         if (empty($rows)) {
             try {
                 $stmt = $this->pdo->prepare("SELECT category, title, content FROM {$table} WHERE company_id = :cid AND status='active' ORDER BY updated_at DESC LIMIT :k");
@@ -144,5 +150,21 @@ class KnowledgeService
             '"Contact","Phone number","You can reach us on +254 7XX XXX XXX."',
         ];
         return implode("\n", $lines);
+    }
+
+    private function tokenize(string $query): array
+    {
+        $stop = ['what', 'are', 'the', 'you', 'your', 'do', 'does', 'did', 'is', 'a', 'an', 'of', 'for', 'i', 'we', 'our', 'can', 'could', 'how', 'to', 'about', 'with', 'this', 'that', 'me', 'my', 'please', 'hello', 'hi', 'and', 'or', 'in', 'on', 'at', 'from', 'there', 'their', 'them', 'us', 'it', 'its', 'offering', 'offer', 'tell', 'give', 'show', 'list', 'available'];
+        $words = preg_split('/[^a-zA-Z0-9]+/', strtolower($query));
+        $out = [];
+        foreach ($words as $w) {
+            $w = trim($w);
+            if (strlen($w) <= 2 || in_array($w, $stop, true)) continue;
+            $out[] = $w;
+            if (str_ends_with($w, 'ies') && strlen($w) > 4) $out[] = substr($w, 0, -3) . 'y';
+            elseif (str_ends_with($w, 'es') && strlen($w) > 3) $out[] = substr($w, 0, -2);
+            elseif (str_ends_with($w, 's') && strlen($w) > 3) $out[] = substr($w, 0, -1);
+        }
+        return array_values(array_unique($out));
     }
 }

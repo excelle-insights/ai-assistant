@@ -106,13 +106,14 @@ class AiWhatsappService
 
         // Resolve company id
         $companyId = (int)($conv['company_id'] ?? 0);
-        if (!$companyId) $companyId = 1;
+        if (!$companyId) $companyId = $this->resolveCompanyId();
 
-        // Knowledge + self-learned Q&A + schema context
+        // Knowledge + self-learned Q&A + schema + reference context
         $chunks = $this->knowledge->search($companyId, $messageBody, 5);
         $training = $this->recentTraining($companyId, $messageBody, 3);
         $domain = $this->schema->domainSummary(40);
         $schemaFields = $this->schema->searchSchema($messageBody, 5);
+        $reference = $this->schema->searchReference($companyId, $messageBody, 4);
         $ctx = $this->companyContext($companyId);
 
         $companyName = (string)($ctx['name'] ?? '');
@@ -121,6 +122,7 @@ class AiWhatsappService
         $system = "You are a helpful customer-support assistant" . ($companyName ? " for {$companyName}" : "") . "."
             . " LANGUAGE RULE: Reply in the SAME language the customer wrote in. If you cannot determine it, reply in English. Never switch languages; translate any knowledge into the customer's language."
             . " Answer ONLY from the provided KNOWLEDGE, PREVIOUS Q&A and BUSINESS DATA."
+            . " When the customer asks what services/products/items are offered, list them from the AVAILABLE DATA."
             . " If the customer's question is not covered by the knowledge or is unrelated to " . ($companyName ? "{$companyName}'s" : "the company's") . " services, do NOT answer it directly. Instead politely say you only assist with " . ($servicesTxt ?: "the company's services") . " and offer to connect them to a team member for anything else."
             . " Be concise and friendly. Do not use markdown.";
 
@@ -128,6 +130,7 @@ class AiWhatsappService
         if (!empty($chunks)) $user .= "KNOWLEDGE:\n" . implode("\n---\n", $chunks) . "\n\n";
         if (!empty($training)) $user .= "PREVIOUS Q&A:\n" . implode("\n", $training) . "\n\n";
         if ($domain !== '') $user .= "BUSINESS DATA (tables): " . $domain . "\n\n";
+        if (!empty($reference)) $user .= "AVAILABLE DATA:\n" . implode("\n", $reference) . "\n\n";
         if (!empty($schemaFields)) $user .= "RELEVANT FIELDS:\n" . implode("\n", $schemaFields) . "\n\n";
         $user .= "CUSTOMER MESSAGE:\n{$messageBody}\n\nReply:";
 
@@ -243,6 +246,29 @@ class AiWhatsappService
             $out[] = "Q: " . $r['question'] . "\nA: " . $r['answer'];
         }
         return $out;
+    }
+
+    private function resolveCompanyId(): int
+    {
+        $env = (int)($_ENV['AI_WHATSAPP_COMPANY_ID'] ?? 0);
+        if ($env > 0) return $env;
+
+        $appName = trim((string)($_ENV['APP_NAME'] ?? ''));
+        if ($appName !== '') {
+            try {
+                $stmt = $this->pdo->prepare("SELECT id FROM companies WHERE name = :n AND is_active = 1 ORDER BY id ASC LIMIT 1");
+                $stmt->execute(['n' => $appName]);
+                $id = $stmt->fetchColumn();
+                if ($id) return (int)$id;
+            } catch (\Throwable $e) {}
+        }
+
+        try {
+            $id = $this->pdo->query("SELECT id FROM companies WHERE is_active = 1 ORDER BY id ASC LIMIT 1")->fetchColumn();
+            if ($id) return (int)$id;
+        } catch (\Throwable $e) {}
+
+        return 1;
     }
 
     private function companyContext(int $companyId): array
