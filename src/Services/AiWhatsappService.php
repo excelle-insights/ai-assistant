@@ -19,6 +19,7 @@ class AiWhatsappService
         private ?SystemContextProviderInterface $contextProvider = null,
         private ?OpenAIClient $openAI = null,
         private ?KnowledgeService $knowledge = null,
+        private ?SchemaService $schema = null,
     ) {
         EnvLoader::load();
         $this->prefix = $_ENV['AI_WHATSAPP_TABLE_PREFIX'] ?? 'ai_whatsapp';
@@ -35,6 +36,7 @@ class AiWhatsappService
             try { $this->openAI = new OpenAIClient(); } catch (\Throwable $e) { $this->openAI = null; }
         }
         $this->knowledge = $knowledge ?? new KnowledgeService($this->pdo, $this->openAI);
+        $this->schema = $schema ?? new SchemaService($this->pdo);
     }
 
     /**
@@ -106,9 +108,11 @@ class AiWhatsappService
         $companyId = (int)($conv['company_id'] ?? 0);
         if (!$companyId) $companyId = 1;
 
-        // Knowledge + self-learned Q&A context
+        // Knowledge + self-learned Q&A + schema context
         $chunks = $this->knowledge->search($companyId, $messageBody, 5);
         $training = $this->recentTraining($companyId, $messageBody, 3);
+        $domain = $this->schema->domainSummary(40);
+        $schemaFields = $this->schema->searchSchema($messageBody, 5);
         $ctx = $this->companyContext($companyId);
 
         $companyName = (string)($ctx['name'] ?? '');
@@ -116,13 +120,15 @@ class AiWhatsappService
 
         $system = "You are a helpful customer-support assistant" . ($companyName ? " for {$companyName}" : "") . "."
             . " LANGUAGE RULE: Reply in the SAME language the customer wrote in. If you cannot determine it, reply in English. Never switch languages; translate any knowledge into the customer's language."
-            . " Answer ONLY from the provided KNOWLEDGE and PREVIOUS Q&A."
+            . " Answer ONLY from the provided KNOWLEDGE, PREVIOUS Q&A and BUSINESS DATA."
             . " If the customer's question is not covered by the knowledge or is unrelated to " . ($companyName ? "{$companyName}'s" : "the company's") . " services, do NOT answer it directly. Instead politely say you only assist with " . ($servicesTxt ?: "the company's services") . " and offer to connect them to a team member for anything else."
             . " Be concise and friendly. Do not use markdown.";
 
         $user = "";
         if (!empty($chunks)) $user .= "KNOWLEDGE:\n" . implode("\n---\n", $chunks) . "\n\n";
         if (!empty($training)) $user .= "PREVIOUS Q&A:\n" . implode("\n", $training) . "\n\n";
+        if ($domain !== '') $user .= "BUSINESS DATA (tables): " . $domain . "\n\n";
+        if (!empty($schemaFields)) $user .= "RELEVANT FIELDS:\n" . implode("\n", $schemaFields) . "\n\n";
         $user .= "CUSTOMER MESSAGE:\n{$messageBody}\n\nReply:";
 
         if (!$this->openAI) {
