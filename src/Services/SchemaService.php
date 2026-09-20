@@ -188,25 +188,166 @@ class SchemaService
     /** Search schema for entries matching the query. Returns ["table.column: description", ...]. */
     public function searchSchema(string $query, int $k = 6): array
     {
+        $words = $this->tokenize($query);
+        if (empty($words)) return [];
+
         $table = $this->prefix . '_schema';
-        $like = '%' . $query . '%';
+        $clauses = [];
+        $params = [];
+        foreach ($words as $w) {
+            $clauses[] = '(table_name LIKE ? OR column_name LIKE ? OR description LIKE ?)';
+            $params[] = "%{$w}%"; $params[] = "%{$w}%"; $params[] = "%{$w}%";
+        }
+        $sql = "SELECT table_name, column_name, description FROM {$table} WHERE " . implode(' OR ', $clauses) . ' LIMIT 200';
         try {
-            $stmt = $this->pdo->prepare("SELECT table_name, column_name, description FROM {$table} WHERE (table_name LIKE :q1 OR column_name LIKE :q2 OR description LIKE :q3) ORDER BY (description IS NOT NULL AND description != '') DESC LIMIT :k");
-            $stmt->bindValue(':q1', $like);
-            $stmt->bindValue(':q2', $like);
-            $stmt->bindValue(':q3', $like);
-            $stmt->bindValue(':k', $k, PDO::PARAM_INT);
-            $stmt->execute();
+            $stmt = $this->pdo->prepare($sql);
+            $stmt->execute($params);
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (\Throwable $e) {
+            return [];
+        }
+
+        $scored = [];
+        foreach ($rows as $r) {
+            $score = 0;
+            foreach ($words as $w) {
+                if (str_contains(strtolower($r['table_name']), $w)) $score += 3;
+                if (str_contains(strtolower($r['column_name']), $w)) $score += 1;
+                if (str_contains(strtolower((string)$r['description']), $w)) $score += 2;
+            }
+            if ($score > 0) $scored[] = ['s' => $score, 't' => $r['table_name'], 'c' => $r['column_name'], 'd' => $r['description']];
+        }
+        usort($scored, fn($a, $b) => $b['s'] <=> $a['s']);
+        $scored = array_slice($scored, 0, $k);
+
+        $out = [];
+        foreach ($scored as $r) {
+            $label = str_replace('_', ' ', $r['t'] . ' ' . $r['c']);
+            $out[] = $label . ($r['d'] ? ': ' . $r['d'] : '');
+        }
+        return $out;
+    }
+
+    /**
+     * Extract actual values from small "lookup" tables (service_types, asset_types, ...)
+     * so the AI can quote real data, not just column names. Stores one summary row per table.
+     */
+    public function extractReferenceValues(int $companyId): array
+    {
+        $table = $this->prefix . '_reference';
+        $suffixes = ['_types', '_categories', '_statuses', '_units', '_levels', '_roles', '_currencies', '_priorities', '_conditions', '_frequencies', '_methods', '_departments', '_positions', '_industries', '_sources', '_groups', '_classes', '_grades'];
+        $results = [];
+        foreach ($this->tables() as $t) {
+            $name = $t['name'];
+            $isLookup = false;
+            foreach ($suffixes as $s) {
+                if (str_ends_with($name, $s)) { $isLookup = true; break; }
+            }
+            if (!$isLookup) continue;
+
+            $cols = $this->columns($name);
+            $hasName = false;
+            $hasCompany = false;
+            foreach ($cols as $c) {
+                if (in_array($c['name'], ['name', 'title', 'label'], true)) $hasName = true;
+                if ($c['name'] === 'company_id') $hasCompany = true;
+            }
+            if (!$hasName) continue;
+
+            $values = $this->extractLookupValues($name, $companyId, $hasCompany);
+            if (empty($values)) continue;
+
+            $label = $this->lookupLabel($name);
+            $summary = implode(', ', $values);
+            $this->pdo->prepare("INSERT INTO {$table} (company_id, source_table, label, summary, created_at, updated_at) VALUES (:cid, :t, :l, :s, NOW(), NOW()) ON DUPLICATE KEY UPDATE label = VALUES(label), summary = VALUES(summary), updated_at = NOW()")
+                ->execute(['cid' => $companyId, 't' => $name, 'l' => $label, 's' => $summary]);
+            $results[] = ['table' => $name, 'label' => $label, 'count' => count($values)];
+        }
+        return $results;
+    }
+
+    public function searchReference(int $companyId, string $query, int $k = 5): array
+    {
+        $words = $this->tokenize($query);
+        if (empty($words)) return [];
+        $table = $this->prefix . '_reference';
+        $clauses = [];
+        $params = [];
+        foreach ($words as $w) {
+            $clauses[] = '(source_table LIKE ? OR label LIKE ? OR summary LIKE ?)';
+            $params[] = "%{$w}%"; $params[] = "%{$w}%"; $params[] = "%{$w}%";
+        }
+        $sql = "SELECT label, summary FROM {$table} WHERE company_id = ? AND (" . implode(' OR ', $clauses) . ') LIMIT ' . (int)$k;
+        array_unshift($params, $companyId);
+        try {
+            $stmt = $this->pdo->prepare($sql);
+            $stmt->execute($params);
             $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
         } catch (\Throwable $e) {
             return [];
         }
         $out = [];
-        foreach ($rows as $r) {
-            $label = str_replace('_', ' ', $r['table_name'] . ' ' . $r['column_name']);
-            $out[] = $label . ($r['description'] ? ': ' . $r['description'] : '');
-        }
+        foreach ($rows as $r) $out[] = ($r['label'] ? $r['label'] . ': ' : '') . $r['summary'];
         return $out;
+    }
+
+    public function listReference(int $companyId): array
+    {
+        $table = $this->prefix . '_reference';
+        try {
+            $stmt = $this->pdo->prepare("SELECT id, company_id, source_table, label, summary FROM {$table} WHERE company_id = :cid ORDER BY label");
+            $stmt->execute(['cid' => $companyId]);
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (\Throwable $e) {
+            return [];
+        }
+    }
+
+    private function extractLookupValues(string $table, int $companyId, bool $hasCompany): array
+    {
+        $nameCol = null;
+        foreach (['name', 'title', 'label'] as $c) {
+            foreach ($this->columns($table) as $col) {
+                if ($col['name'] === $c) { $nameCol = $c; break 2; }
+            }
+        }
+        if (!$nameCol) return [];
+
+        $conds = [];
+        if ($hasCompany) $conds[] = '(company_id = ' . (int)$companyId . ' OR company_id IS NULL)';
+        $conds[] = "(`{$nameCol}` IS NOT NULL AND `{$nameCol}` != '')";
+        $sql = "SELECT DISTINCT `{$nameCol}` AS v FROM `{$table}` WHERE " . implode(' AND ', $conds) . " ORDER BY `{$nameCol}` ASC LIMIT 50";
+        try {
+            return $this->pdo->query($sql)->fetchAll(PDO::FETCH_COLUMN);
+        } catch (\Throwable $e) {
+            return [];
+        }
+    }
+
+    private function lookupLabel(string $table): string
+    {
+        $t = $table;
+        $suffixes = ['_types', '_categories', '_statuses', '_units', '_levels', '_roles', '_currencies', '_priorities', '_conditions', '_frequencies', '_methods', '_departments', '_positions', '_industries', '_sources', '_groups', '_classes', '_grades'];
+        foreach ($suffixes as $s) {
+            if (str_ends_with($t, $s)) { $t = substr($t, 0, -strlen($s)); break; }
+        }
+        return ucfirst(str_replace('_', ' ', $t));
+    }
+
+    private function tokenize(string $query): array
+    {
+        $stop = ['what', 'are', 'the', 'you', 'your', 'do', 'does', 'did', 'is', 'a', 'an', 'of', 'for', 'i', 'we', 'our', 'can', 'could', 'how', 'to', 'about', 'with', 'this', 'that', 'me', 'my', 'please', 'hello', 'hi', 'and', 'or', 'in', 'on', 'at', 'from', 'there', 'their', 'them', 'us', 'it', 'its', 'offering', 'offer', 'tell', 'give', 'show', 'list', 'available'];
+        $words = preg_split('/[^a-zA-Z0-9]+/', strtolower($query));
+        $out = [];
+        foreach ($words as $w) {
+            $w = trim($w);
+            if (strlen($w) <= 2 || in_array($w, $stop, true)) continue;
+            $out[] = $w;
+            if (str_ends_with($w, 'ies') && strlen($w) > 4) $out[] = substr($w, 0, -3) . 'y';
+            elseif (str_ends_with($w, 'es') && strlen($w) > 3) $out[] = substr($w, 0, -2);
+            elseif (str_ends_with($w, 's') && strlen($w) > 3) $out[] = substr($w, 0, -1);
+        }
+        return array_values(array_unique($out));
     }
 
     /** Compact list of table names (humanized) for domain awareness. */
