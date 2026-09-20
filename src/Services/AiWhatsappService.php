@@ -119,11 +119,15 @@ class AiWhatsappService
         $companyName = (string)($ctx['name'] ?? '');
         $servicesTxt = $this->servicesText($ctx['services'] ?? null);
 
+        // Try a safe read-only live query for data questions (pricing, counts, records)
+        $queryResult = $this->tryLiveQuery($messageBody);
+
         $system = "You are a helpful customer-support assistant" . ($companyName ? " for {$companyName}" : "") . "."
             . " LANGUAGE RULE: Reply in the SAME language the customer wrote in. If you cannot determine it, reply in English. Never switch languages; translate any knowledge into the customer's language."
-            . " Answer ONLY from the provided KNOWLEDGE, PREVIOUS Q&A and BUSINESS DATA."
+            . " Use the provided KNOWLEDGE, PREVIOUS Q&A, BUSINESS DATA and (when present) the DATABASE QUERY + QUERY RESULT to answer."
+            . " When a QUERY RESULT is present, it is authoritative — answer the question directly from it (state the count, price, or records plainly)."
             . " When the customer asks what services/products/items are offered, list them from the AVAILABLE DATA."
-            . " If the customer's question is not covered by the knowledge or is unrelated to " . ($companyName ? "{$companyName}'s" : "the company's") . " services, do NOT answer it directly. Instead politely say you only assist with " . ($servicesTxt ?: "the company's services") . " and offer to connect them to a team member for anything else."
+            . " Only if you have no relevant data at all, politely say you will connect them to a team member."
             . " Be concise and friendly. Do not use markdown.";
 
         $user = "";
@@ -132,6 +136,10 @@ class AiWhatsappService
         if ($domain !== '') $user .= "BUSINESS DATA (tables): " . $domain . "\n\n";
         if (!empty($reference)) $user .= "AVAILABLE DATA:\n" . implode("\n", $reference) . "\n\n";
         if (!empty($schemaFields)) $user .= "RELEVANT FIELDS:\n" . implode("\n", $schemaFields) . "\n\n";
+        if ($queryResult !== null) {
+            $user .= "DATABASE QUERY: " . $queryResult['sql'] . "\n";
+            $user .= "QUERY RESULT: " . $this->formatRows($queryResult['rows']) . "\n\n";
+        }
         $user .= "CUSTOMER MESSAGE:\n{$messageBody}\n\nReply:";
 
         if (!$this->openAI) {
@@ -246,6 +254,44 @@ class AiWhatsappService
             $out[] = "Q: " . $r['question'] . "\nA: " . $r['answer'];
         }
         return $out;
+    }
+
+    private function tryLiveQuery(string $question): ?array
+    {
+        if (!$this->openAI) return null;
+        $schemaCtx = $this->schema->sqlSchemaContext();
+        if ($schemaCtx === '') return null;
+
+        try {
+            $res = $this->openAI->chat([
+                ['role' => 'system', 'content' => "You are a MySQL query generator for a workshop/garage database. Given the schema and a customer's question, output ONE read-only SELECT query to answer it.\n\nRules:\n- Output ONLY the SQL, or the exact word NO_QUERY only if the question is a greeting or clearly about nothing in the database.\n- Use only the tables/columns in SCHEMA.\n- 'how much / price / cost / charge' → SELECT name, default_amount (or the amount/price/cost column) FROM the relevant table WHERE name LIKE '%keyword%'.\n- 'how many / number of' → SELECT COUNT(*) ...\n- 'recent / latest / last' → SELECT ... ORDER BY created_at DESC LIMIT 5.\n- 'where / located / address' → SELECT address ... FROM branches.\n- Use LIKE '%word%' for name matching. No markdown, no explanations."],
+                ['role' => 'user', 'content' => "SCHEMA (table: columns):\n" . $schemaCtx . "\n\nQUESTION:\n" . $question],
+            ], $_ENV['OPENAI_MODEL'] ?? 'gpt-4o', 0.0);
+            $sql = trim((string)($res['content'] ?? ''));
+        } catch (\Throwable $e) {
+            return null;
+        }
+
+        if ($sql === '' || strtoupper($sql) === 'NO_QUERY') return null;
+
+        $err = $this->schema->validateSql($sql);
+        if ($err !== null) return null;
+
+        try {
+            $rows = $this->schema->runReadOnly($sql);
+            return ['sql' => $sql, 'rows' => $rows];
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    private function formatRows(array $rows): string
+    {
+        if (empty($rows)) return '(no results)';
+        if (count($rows) === 1 && count($rows[0]) === 1) {
+            return (string)reset($rows[0]);
+        }
+        return json_encode($rows, JSON_UNESCAPED_UNICODE);
     }
 
     private function resolveCompanyId(): int

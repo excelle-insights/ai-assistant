@@ -29,17 +29,21 @@ class OpenAIClient
      * Chat completion — same signature as ExcelleCore\AI\OpenAIClient::chat() used in AiController.php:86
      * Returns ['content'=>string, 'usage'=>['prompt_tokens'=>int,'completion_tokens'=>int]]
      */
-    public function chat(array $messages, string $model = 'gpt-4o'): array
+    public function chat(array $messages, string $model = 'gpt-4o', ?float $temperature = null): array
     {
+        $json = [
+            'model' => $model,
+            'messages' => $messages,
+        ];
+        if ($temperature !== null) {
+            $json['temperature'] = $temperature;
+        }
         $res = $this->http->post('https://api.openai.com/v1/chat/completions', [
             'headers' => [
                 'Authorization' => 'Bearer ' . $this->apiKey,
                 'Content-Type' => 'application/json',
             ],
-            'json' => [
-                'model' => $model,
-                'messages' => $messages,
-            ],
+            'json' => $json,
         ]);
 
         $data = json_decode((string)$res->getBody(), true);
