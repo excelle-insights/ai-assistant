@@ -309,6 +309,26 @@ class SchemaService
         return $out;
     }
 
+    /** Return ALL reference summaries (services+prices, counts, categories) so the AI can match semantically. */
+    public function allReference(int $companyId, int $limit = 60): array
+    {
+        $table = $this->prefix . '_reference';
+        try {
+            $stmt = $this->pdo->prepare("SELECT label, summary FROM {$table} WHERE company_id = :cid ORDER BY label LIMIT :lim");
+            $stmt->bindValue(':cid', $companyId, PDO::PARAM_INT);
+            $stmt->bindValue(':lim', $limit, PDO::PARAM_INT);
+            $stmt->execute();
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (\Throwable $e) {
+            return [];
+        }
+        $out = [];
+        foreach ($rows as $r) {
+            $out[] = ($r['label'] ? $r['label'] . ': ' : '') . $r['summary'];
+        }
+        return $out;
+    }
+
     public function listReference(int $companyId): array
     {
         $table = $this->prefix . '_reference';

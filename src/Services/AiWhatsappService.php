@@ -113,7 +113,7 @@ class AiWhatsappService
         $training = $this->recentTraining($companyId, $messageBody, 3);
         $domain = $this->schema->domainSummary(40);
         $schemaFields = $this->schema->searchSchema($messageBody, 5);
-        $reference = $this->schema->searchReference($companyId, $messageBody, 4);
+        $reference = $this->schema->allReference($companyId, 60);
         $ctx = $this->companyContext($companyId);
 
         $companyName = (string)($ctx['name'] ?? '');
@@ -127,6 +127,7 @@ class AiWhatsappService
             . " Use the provided KNOWLEDGE, PREVIOUS Q&A, BUSINESS DATA and (when present) the DATABASE QUERY + QUERY RESULT to answer."
             . " When a QUERY RESULT is present, it is authoritative — answer the question directly from it (state the count, price, or records plainly)."
             . " When the customer asks what services/products/items are offered, list them from the AVAILABLE DATA."
+            . " When the customer asks about a specific service/product or its price, find it in AVAILABLE DATA by meaning — ignore wording differences, paraphrasing and minor spelling mistakes (e.g. 'changing oil service' means 'Oil Change')."
             . " Only if you have no relevant data at all, politely say you will connect them to a team member."
             . " Be concise and friendly. Do not use markdown.";
 
@@ -279,6 +280,7 @@ class AiWhatsappService
 
         try {
             $rows = $this->schema->runReadOnly($sql);
+            if (empty($rows)) return null;
             return ['sql' => $sql, 'rows' => $rows];
         } catch (\Throwable $e) {
             return null;
