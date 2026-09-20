@@ -57,12 +57,58 @@ class SchemaService
         foreach ($this->tables() as $t) {
             foreach ($this->columns($t['name']) as $c) {
                 $total++;
-                $stmt = $this->pdo->prepare("INSERT INTO {$table} (table_name, column_name, data_type, description, created_at, updated_at) VALUES (:t, :c, :d, NULL, NOW(), NOW()) ON DUPLICATE KEY UPDATE data_type = VALUES(data_type), updated_at = NOW()");
-                $stmt->execute(['t' => $t['name'], 'c' => $c['name'], 'd' => substr($c['type'], 0, 250)]);
+                $desc = ($c['comment'] ?? '') !== '' ? $c['comment'] : $this->autoDescription($t['name'], $c['name']);
+                $stmt = $this->pdo->prepare("INSERT INTO {$table} (table_name, column_name, data_type, description, created_at, updated_at) VALUES (:t, :c, :d, :desc, NOW(), NOW()) ON DUPLICATE KEY UPDATE data_type = VALUES(data_type), updated_at = NOW()");
+                $stmt->execute(['t' => $t['name'], 'c' => $c['name'], 'd' => substr($c['type'], 0, 250), 'desc' => $desc]);
                 if ($stmt->rowCount() === 1) $added++;
             }
         }
         return ['added' => $added, 'total' => $total];
+    }
+
+    /** Generate a human-readable description from a column (and its table) name. */
+    public function autoDescription(string $table, string $column): string
+    {
+        $c = strtolower(trim($column));
+
+        $map = [
+            'id' => 'Unique identifier',
+            'name' => 'Name',
+            'description' => 'Description',
+            'details' => 'Details',
+            'notes' => 'Notes',
+            'title' => 'Title',
+            'status' => 'Current status',
+            'type' => 'Type',
+            'is_active' => 'Whether the record is active',
+            'active' => 'Whether the record is active',
+            'first_name' => 'First name',
+            'last_name' => 'Last name',
+            'city' => 'City',
+            'country' => 'Country',
+            'company_id' => 'Owning company reference',
+        ];
+        if (isset($map[$c])) return $map[$c];
+
+        if ($c === 'created_at' || $c === 'created') return 'When the record was created';
+        if ($c === 'updated_at' || $c === 'updated') return 'When the record was last updated';
+        if (str_ends_with($c, '_at')) return 'Timestamp for ' . str_replace('_', ' ', substr($c, 0, -3));
+        if (str_ends_with($c, '_date') || str_ends_with($c, 'date')) return 'Date of ' . str_replace('_', ' ', preg_replace('/_?date$/', '', $c));
+        if (str_contains($c, 'phone') || str_contains($c, 'mobile') || str_contains($c, 'tel')) return 'Phone number';
+        if (str_contains($c, 'email')) return 'Email address';
+        if (str_contains($c, 'address') || str_contains($c, 'location')) return 'Physical address / location';
+        if (str_contains($c, 'price') || str_contains($c, 'amount') || str_contains($c, 'cost') || str_contains($c, 'fee') || str_contains($c, 'rate')) return 'Amount in local currency';
+        if (str_contains($c, 'quantity') || str_contains($c, 'qty')) return 'Quantity';
+        if (str_contains($c, 'expiry') || str_contains($c, 'expires')) return 'Expiry date';
+
+        if (str_ends_with($c, '_id')) {
+            $ref = substr($c, 0, -3);
+            if ($ref === 'user') return 'Reference to the user';
+            return 'Reference to ' . str_replace('_', ' ', $ref);
+        }
+
+        // Generic fallback: humanize the column name.
+        return ucfirst(str_replace('_', ' ', $c));
     }
 
     /** CSV template (table,column,data_type,description) generated from the live DB. */

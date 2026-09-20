@@ -136,8 +136,10 @@ class KnowledgeService
         $lines = [
             'category,title,content',
             '"Working Hours","Opening hours","We are open Monday to Friday 8:00am - 5:00pm and Saturday 8:00am - 12:00pm."',
-            '"Services","Oil change service","We offer oil change services starting from KSh 3,500 for small cars."',
-            '"Pricing","Service cost","Standard service costs KSh 8,000. Full service costs KSh 15,000."',
+            '"Company","Our mission","To provide reliable, high-quality services to our customers."',
+            '"Company","Our vision","To become the most trusted provider in our industry."',
+            '"Company","Core values","Integrity, excellence, customer focus and teamwork."',
+            '"Company","About us","A brief introduction to the company and what it does."',
             '"Contact","Location","We are located along XYZ Road, Nairobi, Kenya."',
             '"Contact","Phone number","You can reach us on +254 7XX XXX XXX."',
         ];
