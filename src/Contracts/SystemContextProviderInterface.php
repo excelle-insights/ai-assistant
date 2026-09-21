@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace ExcelleInsights\AiWhatsapp\Contracts;
+namespace ExcelleInsights\AiAssistant\Contracts;
 
 interface SystemContextProviderInterface
 {

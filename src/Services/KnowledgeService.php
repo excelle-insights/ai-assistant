@@ -2,20 +2,22 @@
 
 declare(strict_types=1);
 
-namespace ExcelleInsights\AiWhatsapp\Services;
+namespace ExcelleInsights\AiAssistant\Services;
 
 use PDO;
-use ExcelleInsights\AiWhatsapp\Client\OpenAIClient;
-use ExcelleInsights\AiWhatsapp\Support\EnvLoader;
+use ExcelleInsights\AiAssistant\Client\OpenAIClient;
+use ExcelleInsights\AiAssistant\Contracts\LlmClientInterface;
+use ExcelleInsights\AiAssistant\Support\EnvLoader;
+use ExcelleInsights\AiAssistant\Support\TablePrefix;
 
 class KnowledgeService
 {
     private string $prefix;
 
-    public function __construct(private PDO $pdo, private ?OpenAIClient $openAI = null)
+    public function __construct(private PDO $pdo, private ?LlmClientInterface $openAI = null)
     {
         EnvLoader::load();
-        $this->prefix = $_ENV['AI_WHATSAPP_TABLE_PREFIX'] ?? 'ai_whatsapp';
+        $this->prefix = TablePrefix::get();
         if (!$openAI) {
             try { $this->openAI = new OpenAIClient(); } catch (\Throwable $e) { $this->openAI = null; }
         }
@@ -103,7 +105,11 @@ class KnowledgeService
     public function importCsv(int $companyId, string $csv, string $source = 'csv'): array
     {
         $result = ['inserted' => 0, 'skipped' => 0, 'errors' => []];
-        $rows = array_map(fn($r) => str_getcsv($r, ',', '"', '\\'), preg_split('/\r\n|\r|\n/', trim($csv)));
+        if (trim($csv) === '') {
+            $result['errors'][] = 'CSV is empty';
+            return $result;
+        }
+        $rows = array_map(fn($r) => str_getcsv((string) $r, ',', '"', '\\'), preg_split('/\r\n|\r|\n/', trim($csv)));
         if (empty($rows)) {
             $result['errors'][] = 'CSV is empty';
             return $result;

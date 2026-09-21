@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-namespace ExcelleInsights\AiWhatsApp\Support;
+namespace ExcelleInsights\AiAssistant\Support;
 
 use Dotenv\Dotenv;
 

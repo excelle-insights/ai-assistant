@@ -1,86 +1,119 @@
-# Excelle Insights — AI WhatsApp Package
+# Excelle Insights — AI Assistant Package
 
-Standalone Composer package that reads inbound WhatsApp messages and auto-replies with a trainable AI — same install pattern as `excelle-insights/whatsapp`, reusing the host app's OpenAI stack.
+Standalone Composer package: one trainable AI core for WhatsApp auto-reply,
+in-app user guidance, diagnosis support and business analysis — same install
+pattern as `excelle-insights/whatsapp`, working with **any LLM provider**
+(OpenAI, OpenRouter, Ollama, Together, vLLM…), not just OpenAI.
+
+> Name history: folder/repo are now `ai-assistant`; own tables are
+> `ai_assistant_*`. The composer name `excelle-insights/ai-assistant` and the
+> PHP namespace `ExcelleInsights\AiAssistant\…` are kept until hosts migrate
+> (then they become `excelle-insights/ai-assistant` / `…\AiAssistant\…`).
 
 No edits to `vendor/excelle-insights/whatsapp` required.
 
+Full step-by-step guides live in [`docs/`](docs/README.md) (install, connect,
+knowledge, WhatsApp channel, one-AI router, config, troubleshooting, LLM
+providers + table rename).
+
 ---
+
 ## Features
 
 * Hooks after `WhatsappService::processWebhookPayload()` — no vendor edit.
-* Trainable per `company_id`: FAQs, services, pricing via `ai_whatsapp_knowledge` (embeddings / FTS).
-* Reuses host `OPENAI_API_KEY` / `OPENAI_MODEL` (`AiController.php:76` pattern) — no separate key.
-* Own tables (`AI_WHATSAPP_TABLE_PREFIX`, default `ai_whatsapp`) + `SystemContextProviderInterface` to pull host data without FK tangles.
-* Async queue `ai_whatsapp_queue` + `whatsapp_conversations` / `whatsapp_messages` bridge.
+* One AI for all channels: WhatsApp reply, knowledge-based user guide,
+  vehicle-diagnosis support, business analysis (host routes per intent).
+* Any LLM via `Contracts\LlmClientInterface` + `Support\LlmFactory`
+  (`LLM_PROVIDER=openai|openrouter|together|ollama|vllm|lmstudio|custom`).
+* Trainable per `company_id`: FAQs, services, pricing, How-To guides via
+  `ai_assistant_knowledge` (embeddings + keyword search) and self-learning
+  `ai_assistant_training`. No company model? Set `AI_ASSISTANT_TENANT_ID=0`
+  and pass `0` everywhere — `company_id` is only a scoping key, see
+  [`docs/02-connect-application.md`](docs/02-connect-application.md).
+* Own tables (`AI_ASSISTANT_TABLE_PREFIX`, default `ai_assistant`; legacy
+  `AI_WHATSAPP_TABLE_PREFIX` still honoured) + `SystemContextProviderInterface`
+  to pull host data without FK tangles. Rename migration included.
+* Async queue `ai_assistant_queue` + `whatsapp_conversations` / `whatsapp_messages` bridge.
 
 ---
 
 ## Requirements
 
 * PHP >= 8.1, PDO MySQL, `ext-json`
-* Host app with `excelle-insights/whatsapp` tables (`whatsapp_business_profiles`, `whatsapp_messages`, `whatsapp_conversations`, `whatsapp_credentials`, `whatsapp_access_tokens`) and `DB_DSN`/`DB_USER`/`DB_PASSWORD` in `.env`
-* Host `.env` OpenAI:
+* For the WhatsApp channel: host app with `excelle-insights/whatsapp` tables
+  (`whatsapp_business_profiles`, `whatsapp_messages`, `whatsapp_conversations`,
+  `whatsapp_credentials`, `whatsapp_access_tokens`). Other channels need no
+  WhatsApp tables.
+* Host `.env` LLM (OpenAI default; alternatives in [`docs/08-llm-providers-and-rename.md`](docs/08-llm-providers-and-rename.md)):
   ```
-  OPENAI_API_KEY=sk-proj-...
-  OPENAI_MODEL=gpt-4o
+  LLM_PROVIDER=openai
+  LLM_API_KEY=sk-proj-...        # or OPENAI_API_KEY (fallback)
+  LLM_MODEL=gpt-4o               # or OPENAI_MODEL (fallback)
   OPENAI_WHISPER_MODEL=whisper-1
-  OPENAI_REQUEST_TIMEOUT=30
+  LLM_REQUEST_TIMEOUT=30
   AI_RATE_LIMIT_PER_HOUR=60
   ```
-* Host `.env` AI WhatsApp auto-reply:
+* Host `.env` auto-reply + tables:
   ```
   # Toggle AI auto-reply for inbound WhatsApp messages. false/0 disables.
-  AI_WHATSAPP_AUTO_REPLY=true
-  # Table prefix for ai_whatsapp_knowledge / _sessions / _queue.
+  AI_ASSISTANT_AUTO_REPLY=true
+  # Canonical prefix for ai_assistant_knowledge / _sessions / _queue / _training / _schema / _reference.
+  AI_ASSISTANT_TABLE_PREFIX=ai_assistant
+  # Legacy fallbacks (pre-rename installs). Remove after migrating.
   AI_WHATSAPP_TABLE_PREFIX=ai_whatsapp
   # Optional fallback template id to queue when the 24h session window is closed.
   # 0 = try direct send anyway (will fail if window closed). Set to an Approved
   # whatsapp_templates.template_id to queue a template instead.
-  AI_WHATSAPP_FALLBACK_TEMPLATE=0
+  AI_ASSISTANT_FALLBACK_TEMPLATE=0
   ```
+* Migrations need `DB_HOST` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` in host `.env`
+  (runtime PDO is injected by the host, or built from `DB_DSN` by the facade).
 
 ---
 
 ## Installation
 
-### 1. Require via Composer (after you push this package to GitHub / Packagist)
+### 1. Require via Composer
 
 ```bash
-composer require excelle-insights/ai-whatsapp
+composer require excelle-insights/ai-assistant
 ```
 
 Or for local dev add to host `composer.json`:
 
 ```json
 "repositories": [
-  {"type": "vcs", "url": "/usr/local/var/www/ai-whatsapp"}
+  {"type": "vcs", "url": "/usr/local/var/www/ai-assistant"}
 ],
 "require": {
-  "excelle-insights/ai-whatsapp": "*"
+  "excelle-insights/ai-assistant": "*"
 }
 ```
 
 ```bash
-composer update excelle-insights/ai-whatsapp
+composer update excelle-insights/ai-assistant
 ```
 
 ### 2. Run package migrations (own `phinx.php`, like `whatsapp` package)
 
 ```bash
-# Host already has whatsapp tables:
-vendor/bin/phinx migrate -c vendor/excelle-insights/whatsapp/phinx.php
-
 # AI package tables:
-vendor/bin/phinx migrate -c vendor/excelle-insights/ai-whatsapp/phinx.php
+vendor/bin/phinx migrate -c vendor/excelle-insights/ai-assistant/phinx.php
 
 # Or from package dir:
-cd /usr/local/var/www/ai-whatsapp && vendor/bin/phinx migrate -c phinx.php
+cd /usr/local/var/www/ai-assistant && vendor/bin/phinx migrate -c phinx.php
 ```
 
-Creates:
-* `ai_whatsapp_knowledge` (`company_id`, `title`, `content`, `embedding`, `source`, `status`)
-* `ai_whatsapp_sessions` (`conversation_id`, `company_id`, `history_json`, `expires_at`)
-* `ai_whatsapp_queue` (`conversation_id`, `wa_message_id`, `status`, `attempts`, `error`)
+Creates (prefix from `TablePrefix::get()`, default `ai_assistant`):
+* `{prefix}_knowledge` (`company_id`, `category`, `title`, `content`, `embedding`, `source`, `status`)
+* `{prefix}_sessions` (`conversation_id`, `company_id`, `history_json`, `expires_at`)
+* `{prefix}_queue` (`conversation_id`, `wa_message_id`, `status`, `payload`, `attempts`, `error`)
+* `{prefix}_training` (`company_id`, `question`, `answer`)
+* `{prefix}_schema` (learned field descriptions)
+* `{prefix}_reference` (lookup summaries: services + prices, counts)
+
+Upgrading from `ai_whatsapp_*`? Migration `20260922000000` renames old → new,
+data preserved — see [`docs/08-llm-providers-and-rename.md`](docs/08-llm-providers-and-rename.md) §3.
 
 No `company_id` column added to vendor `whatsapp_*` tables.
 
@@ -89,8 +122,8 @@ No `company_id` column added to vendor `whatsapp_*` tables.
 In `api/whatsapp/callback.php` and `api/src/Controllers/WhatsappController.php::webhookProcess()` after `WhatsappService::processWebhookPayload($payload)`:
 
 ```php
-if (class_exists(\ExcelleInsights\AiWhatsapp\Facade\AiWhatsappManager::class)) {
-    (new \ExcelleInsights\AiWhatsapp\Services\AiWhatsappService())->onInboundMessages($results);
+if (class_exists(\ExcelleInsights\AiAssistant\Facade\AiAssistantManager::class)) {
+    (new \ExcelleInsights\AiAssistant\Services\AiAssistantService())->onInboundMessages($results);
 }
 ```
 
@@ -100,7 +133,7 @@ if (class_exists(\ExcelleInsights\AiWhatsapp\Facade\AiWhatsappManager::class)) {
 
 ```php
 // api/src/Services/MaintainaContextProvider.php
-use ExcelleInsights\AiWhatsapp\Contracts\SystemContextProviderInterface;
+use ExcelleInsights\AiAssistant\Contracts\SystemContextProviderInterface;
 
 class MaintainaContextProvider implements SystemContextProviderInterface {
   public function getCompanyContext(int $companyId): array {
@@ -109,60 +142,73 @@ class MaintainaContextProvider implements SystemContextProviderInterface {
     return ['name'=>$row['name'], 'services'=> $db->query("SELECT name FROM service_types WHERE company_id=$companyId")->fetchAll(PDO::FETCH_COLUMN)];
   }
   public function getCustomerContext(int $conversationId): array { /* last 3 service_records like AiController.php:604 */ return []; }
-  public function getCompanyKnowledge(int $companyId, string $query, int $k=5): array { /* FTS over ai_whatsapp_knowledge */ return []; }
+  public function getCompanyKnowledge(int $companyId, string $query, int $k=5): array { /* FTS over ai_assistant_knowledge */ return []; }
   public function canAutoReply(int $conversationId): bool { return true; } // business hours, opt-in
 }
 ```
 
-Pass to manager:
+Pass to manager (any `LlmClientInterface` accepted — use `LlmFactory::make()`
+for env-driven provider selection):
 
 ```php
-$ai = new \ExcelleInsights\AiWhatsapp\Facade\AiWhatsappManager(
+use ExcelleInsights\AiAssistant\Support\LlmFactory;
+
+$ai = new \ExcelleInsights\AiAssistant\Facade\AiAssistantManager(
   pdo: \ExcelleCore\Core\Database::getInstance()->getConnection(),
   contextProvider: new MaintainaContextProvider(),
-  openAI: new \ExcelleCore\AI\OpenAIClient() // reuse host's, or null to use package's fallback
+  openAI: LlmFactory::make() // or new \ExcelleCore\AI\OpenAIClient() to reuse host's
 );
 ```
 
-If you don't provide `openAI`, package uses its own `Client\OpenAIClient` reading `OPENAI_API_KEY` from host `.env` (like `WhatsAppManager.php:45` `EnvLoader::load()`).
+If you don't provide `openAI`, the package builds one via `LlmFactory::make()`
+reading `LLM_*` (fallback `OPENAI_*`) from host `.env`.
+
+Any app works here: any `PDO`, any `SystemContextProviderInterface`
+implementation, any `LlmClientInterface` (`LlmFactory::make()` or your own) —
+`ExcelleCore\*` above is just the MaintainA example.
 
 ### 5. Train
 
 ```bash
-curl -X POST https://host/api/ai-whatsapp/knowledge \
+curl -X POST https://host/api/integrations/whatsapp/ai-knowledge/import \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"company_id":1,"title":"Hours","content":"Mon-Fri 8am-5pm, Sat 8-12"}'
+  -d '{"csv":"category,title,content\n\"Working Hours\",\"Opening hours\",\"Mon-Fri 8am-5pm, Sat 8-12\""}'
 ```
 
 Or via service:
 
 ```php
-$training = new \ExcelleInsights\AiWhatsapp\Services\TrainingService($pdo);
+use ExcelleInsights\AiAssistant\Services\KnowledgeService;
+use ExcelleInsights\AiAssistant\Services\TrainingService;
+
+$knowledge = new KnowledgeService($pdo, LlmFactory::make());
+$training = new TrainingService($pdo, $knowledge);
 $training->ingest($companyId, "Return Policy", "30 days...", "manual");
 ```
 
-File import:
-
-```bash
-curl -X POST https://host/api/ai-whatsapp/knowledge/import -F "file=@policy.pdf" -F "company_id=1"
-```
+File import: `POST https://host/api/integrations/whatsapp/ai-knowledge/import`
+(CSV; see [`docs/03-knowledge-training.md`](docs/03-knowledge-training.md)).
 
 ---
 
 ## Configuration
 
-`config/ai-whatsapp.php` (publish to host `config/` if needed):
+`config/ai-assistant.php` (publish to host `config/` if needed):
 
 ```php
 return [
-  'table_prefix' => $_ENV['AI_WHATSAPP_TABLE_PREFIX'] ?? 'ai_whatsapp',
-  'openai' => [
-    'api_key' => $_ENV['OPENAI_API_KEY'] ?? '',
-    'model' => $_ENV['OPENAI_MODEL'] ?? 'gpt-4o',
-    'timeout' => $_ENV['OPENAI_REQUEST_TIMEOUT'] ?? 30,
+  'table_prefix' => $_ENV['AI_ASSISTANT_TABLE_PREFIX'] ?? $_ENV['AI_WHATSAPP_TABLE_PREFIX'] ?? 'ai_assistant',
+  'llm' => [ // canonical — any OpenAI-compatible provider (see Support\LlmFactory)
+    'provider' => $_ENV['LLM_PROVIDER'] ?? 'openai',
+    'api_key' => $_ENV['LLM_API_KEY'] ?? $_ENV['OPENAI_API_KEY'] ?? '',
+    'base_url' => $_ENV['LLM_BASE_URL'] ?? $_ENV['OPENAI_BASE_URL'] ?? null,
+    'model' => $_ENV['LLM_MODEL'] ?? $_ENV['OPENAI_MODEL'] ?? 'gpt-4o',
+    'embedding_model' => $_ENV['LLM_EMBEDDING_MODEL'] ?? 'text-embedding-3-small',
+    'timeout' => (int)($_ENV['LLM_REQUEST_TIMEOUT'] ?? $_ENV['OPENAI_REQUEST_TIMEOUT'] ?? 30),
+    'whisper_model' => $_ENV['OPENAI_WHISPER_MODEL'] ?? 'whisper-1',
   ],
   'auto_reply' => [
-    'enabled' => ($_ENV['AI_WHATSAPP_AUTO_REPLY'] ?? 'true') !== 'false',
+    'enabled' => ($_ENV['AI_ASSISTANT_AUTO_REPLY'] ?? $_ENV['AI_WHATSAPP_AUTO_REPLY'] ?? 'true') !== 'false',
     'outside_session_use_template' => true, // 24h window → queue template
     'fallback_template_id' => (int)($_ENV['AI_WHATSAPP_FALLBACK_TEMPLATE'] ?? 0),
   ],
@@ -174,30 +220,36 @@ return [
 ## How It Works
 
 1. **Inbound** `POST /api/integrations/whatsapp/webhook` (router flattened `{field,value}`) → `WhatsappService::processWebhookPayload()` inserts `whatsapp_messages` `direction=inbound` + `whatsapp_conversations` + `events`.
-2. **Hook** calls `AiWhatsappService::onInboundMessages()` for each new `wa_message_id`.
+2. **Hook** calls `AiAssistantService::onInboundMessages()` for each new `wa_message_id`.
 3. **Context** via `SystemContextProvider` + **Knowledge** via `KnowledgeService::search($companyId, $messageBody, 5)`.
-4. **Prompt** built and sent via `OpenAIClient::chat()` (same as `AiController.php:220`).
+4. **Prompt** built and sent via the configured LLM (`LlmClientInterface::chat()`, default model from `LlmFactory::defaultModel()`).
 5. **Reply** via `WhatsappApi::sendTextMessage($from, $reply)` if `isSessionActive()` else enqueue to `whatsapp_queue` with template.
+
+Same core answers guide/diagnosis/analysis requests — the host routes per
+intent (see [`docs/05-one-ai-router.md`](docs/05-one-ai-router.md)).
 
 ---
 
-## Pushing to Public & Using in Host
+## Pushing Changes
 
 ```bash
-cd /usr/local/var/www/ai-whatsapp
-git init
+cd /usr/local/var/www/ai-assistant
 git add .
-git commit -m "feat: initial ai-whatsapp package"
-git remote add origin git@github.com:excelle-insights/ai-whatsapp.git
-git push -u origin main
+git commit -m "feat: ..."
+git push origin main   # origin = git@github.com:excelle-insights/ai-assistant.git
 
-# Host:
-composer require excelle-insights/ai-whatsapp
+# Host picks it up:
+cd /path/to/host/api && composer update excelle-insights/ai-assistant
 ```
-Host `composer.json` will then resolve `excelle-insights/ai-whatsapp` from Packagist.
+
+(Cutting over to composer name `excelle-insights/ai-assistant` happens as a
+separate versioned step once hosts are ready.)
+
 ---
 
 ## References
 
-* Host AI: `api/src/Controllers/AiController.php:76` `callAI()`, `api/.env:78` `OPENAI_*`
-* WhatsApp vendor: `api/vendor/excelle-insights/whatsapp/src/Facade/WhatsAppManager.php:45`, `database/migrations/20260101000005_create_whatsapp_messages_table.php:16`, `WHATSAPP_MIGRATION_NOTES.md`
+* Step-by-step: [`docs/`](docs/README.md) (esp. `08-llm-providers-and-rename.md`)
+* Black-box proposal: [`BLACKBOX_DECOUPLING_PROPOSAL.md`](BLACKBOX_DECOUPLING_PROPOSAL.md)
+* Host AI: `api/src/Controllers/AiController.php` `callAI()`, host `.env` `OPENAI_*` / `LLM_*`
+* WhatsApp vendor: `api/vendor/excelle-insights/whatsapp/src/Facade/WhatsAppManager.php`, `WHATSAPP_MIGRATION_NOTES.md` (host docs)

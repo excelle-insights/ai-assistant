@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-use ExcelleInsights\AiWhatsapp\Support\EnvLoader;
+use ExcelleInsights\AiAssistant\Support\EnvLoader;
 
 $dir = __DIR__;
 while (!file_exists($dir . '/vendor/autoload.php')) {

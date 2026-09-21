@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 use Phinx\Migration\AbstractMigration;
 
-final class CreateAiWhatsappKnowledgeTable extends AbstractMigration
+use ExcelleInsights\AiAssistant\Support\TablePrefix;
+
+final class CreateAiAssistantKnowledgeTable extends AbstractMigration
 {
     public function change(): void
     {
-        $prefix = $_ENV['AI_WHATSAPP_TABLE_PREFIX'] ?? 'ai_whatsapp';
+        $prefix = TablePrefix::get();
         $table = $this->table($prefix . '_knowledge');
         if ($table->exists()) return;
 
