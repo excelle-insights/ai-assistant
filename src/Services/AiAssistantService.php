@@ -2,14 +2,17 @@
 
 declare(strict_types=1);
 
-namespace ExcelleInsights\AiWhatsapp\Services;
+namespace ExcelleInsights\AiAssistant\Services;
 
 use PDO;
-use ExcelleInsights\AiWhatsapp\Client\OpenAIClient;
-use ExcelleInsights\AiWhatsapp\Contracts\SystemContextProviderInterface;
-use ExcelleInsights\AiWhatsapp\Support\EnvLoader;
+use ExcelleInsights\AiAssistant\Client\OpenAIClient;
+use ExcelleInsights\AiAssistant\Contracts\LlmClientInterface;
+use ExcelleInsights\AiAssistant\Contracts\SystemContextProviderInterface;
+use ExcelleInsights\AiAssistant\Support\EnvLoader;
+use ExcelleInsights\AiAssistant\Support\LlmFactory;
+use ExcelleInsights\AiAssistant\Support\TablePrefix;
 
-class AiWhatsappService
+class AiAssistantService
 {
     private string $prefix;
     private string $waPrefix;
@@ -17,12 +20,12 @@ class AiWhatsappService
     public function __construct(
         private ?PDO $pdo = null,
         private ?SystemContextProviderInterface $contextProvider = null,
-        private ?OpenAIClient $openAI = null,
+        private ?LlmClientInterface $openAI = null,
         private ?KnowledgeService $knowledge = null,
         private ?SchemaService $schema = null,
     ) {
         EnvLoader::load();
-        $this->prefix = $_ENV['AI_WHATSAPP_TABLE_PREFIX'] ?? 'ai_whatsapp';
+        $this->prefix = TablePrefix::get();
         $this->waPrefix = $_ENV['WHATSAPP_TABLE_PREFIX'] ?? 'whatsapp';
         if (!$pdo) {
             $dsn = $_ENV['DB_DSN'] ?? null;
@@ -60,7 +63,7 @@ class AiWhatsappService
 
     public function onInboundMessage(int $conversationId, string $waMessageId): void
     {
-        $autoEnabled = $_ENV['AI_WHATSAPP_AUTO_REPLY'] ?? 'true';
+        $autoEnabled = $_ENV['AI_ASSISTANT_AUTO_REPLY'] ?? $_ENV['AI_WHATSAPP_AUTO_REPLY'] ?? 'true';
         if ($autoEnabled === 'false' || $autoEnabled === '0') {
             $this->markStatus($conversationId, $waMessageId, 'disabled', 'Auto-reply is turned off');
             return;
@@ -174,7 +177,7 @@ class AiWhatsappService
         }
         $messages[] = ['role' => 'user', 'content' => $user];
 
-        $model = $_ENV['OPENAI_MODEL'] ?? 'gpt-4o';
+        $model = LlmFactory::defaultModel();
         $res = $this->openAI->chat($messages, $model);
         $reply = trim((string)($res['content'] ?? ''));
         if ($reply === '') {
@@ -191,7 +194,7 @@ class AiWhatsappService
         if ($inSession) {
             [$sentOk, $sendError] = $this->sendText($conversationId, $conv['contact_phone'], $reply);
         } else {
-            $tplId = (int)($_ENV['AI_WHATSAPP_FALLBACK_TEMPLATE'] ?? 0);
+            $tplId = (int)($_ENV['AI_ASSISTANT_FALLBACK_TEMPLATE'] ?? $_ENV['AI_WHATSAPP_FALLBACK_TEMPLATE'] ?? 0);
             if ($tplId) {
                 $this->pdo->prepare("INSERT INTO {$this->waPrefix}_queue (lead_id, contact_phone, contact_name, template_id, placeholders_data, status, author_id, created_at) VALUES (0, :phone, :name, :tid, :ph, 'pending', 0, NOW())")
                     ->execute(['phone' => $conv['contact_phone'], 'name' => $conv['contact_name'] ?? null, 'tid' => $tplId, 'ph' => json_encode([$reply])]);
@@ -271,7 +274,7 @@ class AiWhatsappService
         $history[] = ['role' => 'assistant', 'content' => $out];
 
         // Keep a bounded window so the prompt stays small (turn = user + assistant).
-        $maxTurns = (int)($_ENV['AI_WHATSAPP_SESSION_TURNS'] ?? 10);
+        $maxTurns = (int)($_ENV['AI_ASSISTANT_SESSION_TURNS'] ?? $_ENV['AI_WHATSAPP_SESSION_TURNS'] ?? 10);
         if ($maxTurns < 1) $maxTurns = 10;
         if (count($history) > $maxTurns * 2) {
             $history = array_slice($history, -($maxTurns * 2));
@@ -325,7 +328,7 @@ class AiWhatsappService
             $res = $this->openAI->chat([
                 ['role' => 'system', 'content' => "You are a MySQL query generator for a workshop/garage database. Given the schema and a customer's question, output ONE read-only SELECT query to answer it.\n\nRules:\n- Output ONLY the SQL, or the exact word NO_QUERY only if the question is a greeting or clearly about nothing in the database.\n- Use only the tables/columns in SCHEMA.\n- 'how much / price / cost / charge' → SELECT name, default_amount (or the amount/price/cost column) FROM the relevant table WHERE name LIKE '%keyword%'.\n- 'how many / number of' → SELECT COUNT(*) ...\n- 'recent / latest / last' → SELECT ... ORDER BY created_at DESC LIMIT 5.\n- 'where / located / address' → SELECT address ... FROM branches.\n- Use LIKE '%word%' for name matching. No markdown, no explanations."],
                 ['role' => 'user', 'content' => "SCHEMA (table: columns):\n" . $schemaCtx . "\n\nQUESTION:\n" . $question],
-            ], $_ENV['OPENAI_MODEL'] ?? 'gpt-4o', 0.0);
+            ], LlmFactory::defaultModel(), 0.0);
             $sql = trim((string)($res['content'] ?? ''));
         } catch (\Throwable $e) {
             return null;
@@ -354,10 +357,22 @@ class AiWhatsappService
         return json_encode($rows, JSON_UNESCAPED_UNICODE);
     }
 
+    /**
+     * Resolve the tenant id for a conversation.
+     *
+     * Apps WITHOUT a company model set AI_ASSISTANT_TENANT_ID (e.g. 0) and
+     * always pass that same value as $companyId — company_id is only a
+     * scoping key in the package's own tables, never a foreign key.
+     * An explicitly set id (even 0) short-circuits before any `companies`
+     * table lookup, so hosts without that table pay no queries.
+     */
     private function resolveCompanyId(): int
     {
-        $env = (int)($_ENV['AI_WHATSAPP_COMPANY_ID'] ?? 0);
-        if ($env > 0) return $env;
+        foreach (['AI_ASSISTANT_TENANT_ID', 'AI_WHATSAPP_COMPANY_ID'] as $key) {
+            if (isset($_ENV[$key]) && is_numeric($_ENV[$key])) {
+                return (int) $_ENV[$key];
+            }
+        }
 
         $appName = trim((string)($_ENV['APP_NAME'] ?? ''));
         if ($appName !== '') {

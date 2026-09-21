@@ -2,26 +2,27 @@
 
 declare(strict_types=1);
 
-namespace ExcelleInsights\AiWhatsapp\Facade;
+namespace ExcelleInsights\AiAssistant\Facade;
 
 use PDO;
-use ExcelleInsights\AiWhatsapp\Client\OpenAIClient;
-use ExcelleInsights\AiWhatsapp\Contracts\SystemContextProviderInterface;
-use ExcelleInsights\AiWhatsapp\Services\AiWhatsappService;
-use ExcelleInsights\AiWhatsapp\Services\KnowledgeService;
-use ExcelleInsights\AiWhatsapp\Support\EnvLoader;
+use ExcelleInsights\AiAssistant\Client\OpenAIClient;
+use ExcelleInsights\AiAssistant\Contracts\LlmClientInterface;
+use ExcelleInsights\AiAssistant\Contracts\SystemContextProviderInterface;
+use ExcelleInsights\AiAssistant\Services\AiAssistantService;
+use ExcelleInsights\AiAssistant\Services\KnowledgeService;
+use ExcelleInsights\AiAssistant\Support\EnvLoader;
 
-class AiWhatsappManager
+class AiAssistantManager
 {
     private PDO $pdo;
     private ?SystemContextProviderInterface $contextProvider;
-    private OpenAIClient $openAI;
+    private LlmClientInterface $openAI;
     private KnowledgeService $knowledge;
 
     public function __construct(
         ?PDO $pdo = null,
         ?SystemContextProviderInterface $contextProvider = null,
-        ?OpenAIClient $openAI = null,
+        ?LlmClientInterface $openAI = null,
         ?string $envRoot = null
     ) {
         EnvLoader::load($envRoot);
@@ -39,9 +40,9 @@ class AiWhatsappManager
         $this->knowledge = new KnowledgeService($this->pdo, $this->openAI);
     }
 
-    public function getService(): AiWhatsappService
+    public function getService(): AiAssistantService
     {
-        return new AiWhatsappService($this->pdo, $this->contextProvider, $this->openAI, $this->knowledge);
+        return new AiAssistantService($this->pdo, $this->contextProvider, $this->openAI, $this->knowledge);
     }
 
     public function getKnowledgeService(): KnowledgeService

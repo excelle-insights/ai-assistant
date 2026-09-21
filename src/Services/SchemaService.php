@@ -2,10 +2,11 @@
 
 declare(strict_types=1);
 
-namespace ExcelleInsights\AiWhatsapp\Services;
+namespace ExcelleInsights\AiAssistant\Services;
 
 use PDO;
-use ExcelleInsights\AiWhatsapp\Support\EnvLoader;
+use ExcelleInsights\AiAssistant\Support\EnvLoader;
+use ExcelleInsights\AiAssistant\Support\TablePrefix;
 
 /**
  * Reads the host database schema (tables + columns + comments) so the AI can
@@ -39,7 +40,7 @@ class SchemaService
     public function __construct(private PDO $pdo)
     {
         EnvLoader::load();
-        $this->prefix = $_ENV['AI_WHATSAPP_TABLE_PREFIX'] ?? 'ai_whatsapp';
+        $this->prefix = TablePrefix::get();
     }
 
     public function database(): string

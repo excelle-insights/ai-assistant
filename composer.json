@@ -1,8 +1,8 @@
 {
-    "name": "excelle-insights/ai-whatsapp",
-    "description": "Standalone AI WhatsApp reply package — trainable, reusable across apps, uses host OpenAI like excelle-insights/whatsapp",
+    "name": "excelle-insights/ai-assistant",
+    "description": "Standalone AI assistant package — trainable, reusable across apps and LLM providers, one AI for messaging, guidance, diagnosis and analysis",
     "type": "library",
-    "keywords": ["whatsapp", "ai", "openai", "chatbot"],
+    "keywords": ["ai", "assistant", "llm", "openai", "whatsapp", "chatbot"],
     "license": "proprietary",
     "require": {
         "php": ">=8.1",
@@ -16,12 +16,12 @@
     },
     "autoload": {
         "psr-4": {
-            "ExcelleInsights\\AiWhatsapp\\": "src/"
+            "ExcelleInsights\\AiAssistant\\": "src/"
         }
     },
     "autoload-dev": {
         "psr-4": {
-            "ExcelleInsights\\AiWhatsapp\\Tests\\": "tests/"
+            "ExcelleInsights\\AiAssistant\\Tests\\": "tests/"
         }
     },
     "config": {

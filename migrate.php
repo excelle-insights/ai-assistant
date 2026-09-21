@@ -3,7 +3,7 @@
 
 declare(strict_types=1);
 
-use ExcelleInsights\AiWhatsapp\Support\EnvLoader;
+use ExcelleInsights\AiAssistant\Support\EnvLoader;
 
 // Resolve project root + autoload by walking up (robust — not CWD-dependent).
 $dir = __DIR__;
@@ -37,14 +37,16 @@ if (!file_exists($phinxPath)) {
     exit(1);
 }
 
-$prefix = $_ENV['AI_WHATSAPP_TABLE_PREFIX'] ?? 'ai_whatsapp';
+$prefix = $_ENV['AI_ASSISTANT_TABLE_PREFIX'] ?? $_ENV['AI_WHATSAPP_TABLE_PREFIX'] ?? 'ai_assistant';
+$legacy = $_ENV['AI_WHATSAPP_TABLE_PREFIX'] ?? 'ai_whatsapp';
 $migrationsDir = __DIR__ . '/database/migrations';
 
 $tempConfig = sys_get_temp_dir() . '/ai_whatsapp_phinx_' . uniqid() . '.php';
 
 file_put_contents($tempConfig, <<<PHP
 <?php
-\$_ENV['AI_WHATSAPP_TABLE_PREFIX'] = '{$prefix}';
+\$_ENV['AI_ASSISTANT_TABLE_PREFIX'] = '{$prefix}';
+\$_ENV['AI_WHATSAPP_TABLE_PREFIX'] = '{$legacy}';
 return [
     'paths' => [
         'migrations' => '{$migrationsDir}',
@@ -82,7 +84,7 @@ function aiWhatsappRunCommand(string $command, string $cwd): void
 
 try {
     aiWhatsappRunCommand("{$phinxPath} migrate -c {$tempConfig}", $projectRoot);
-    echo "AI WhatsApp migrations ran successfully!\n";
+    echo "AI Assistant migrations ran successfully!\n";
 } catch (Throwable $e) {
     fwrite(STDERR, "Migrations failed:\n{$e->getMessage()}\n");
     @unlink($tempConfig);

@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 use Phinx\Migration\AbstractMigration;
 
+use ExcelleInsights\AiAssistant\Support\TablePrefix;
+
 final class AddTrainingAndCategory extends AbstractMigration
 {
     public function change(): void
     {
-        $prefix = $_ENV['AI_WHATSAPP_TABLE_PREFIX'] ?? 'ai_whatsapp';
+        $prefix = TablePrefix::get();
 
         // category column on knowledge (for CSV organization)
         $knowledge = $this->table($prefix . '_knowledge');

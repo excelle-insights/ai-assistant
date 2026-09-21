@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace ExcelleInsights\AiWhatsapp\Services;
+namespace ExcelleInsights\AiAssistant\Services;
 
 use PDO;
 
@@ -10,9 +10,9 @@ class TrainingService
 {
     public function __construct(private PDO $pdo, private KnowledgeService $knowledge) {}
 
-    public function ingest(int $companyId, string $title, string $content, string $source = 'manual'): int
+    public function ingest(int $companyId, string $title, string $content, string $source = 'manual', ?string $category = null): int
     {
-        return $this->knowledge->ingest($companyId, $title, $content, $source);
+        return $this->knowledge->ingest($companyId, $title, $content, $source, $category);
     }
 
     public function importFile(int $companyId, string $filePath, string $source = 'file'): int
