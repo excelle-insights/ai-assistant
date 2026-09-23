@@ -19,7 +19,7 @@ use ExcelleInsights\AiAssistant\Support\TablePrefix;
  * (AI_ASSISTANT_TABLE_PREFIX, default ai_assistant) and renames whatever
  * legacy tables exist to the canonical names.
  */
-final class RenameAiAssistantToAiAssistant extends AbstractMigration
+final class RenameAiWhatsappToAiAssistant extends AbstractMigration
 {
     private const SUFFIXES = [
         'knowledge',
