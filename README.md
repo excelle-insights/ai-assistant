@@ -167,6 +167,49 @@ Any app works here: any `PDO`, any `SystemContextProviderInterface`
 implementation, any `LlmClientInterface` (`LlmFactory::make()` or your own) —
 `ExcelleCore\*` above is just the MaintainA example.
 
+### 4b. Receive booking requests (host implements interface)
+
+When a customer asks to book ("I want to book…", "nataka miadi…"), the
+package detects the intent, extracts the service + preferred date from the
+conversation, and hands a `Support\BookingIntent` to the host. The package
+never writes app tables — the host persists it however its domain requires
+(booking row, ticket, CRM lead).
+
+```php
+// Host side, e.g. api/src/Services/AppBookingHandler.php
+use ExcelleInsights\AiAssistant\Contracts\BookingHandlerInterface;
+use ExcelleInsights\AiAssistant\Support\BookingIntent;
+
+class AppBookingHandler implements BookingHandlerInterface {
+  public function handleBookingIntent(BookingIntent $intent): void {
+    // $intent->companyId, ->contactPhone, ->contactName, ->service,
+    // ->preferredDate (Y-m-d or null), ->confidence, ->messageBody, ->aiReply
+    // De-dupe + insert into YOUR bookings table + notify staff here.
+  }
+}
+```
+
+Register it where you hook inbound (constructor or setter — both work):
+
+```php
+$ai = new \ExcelleInsights\AiAssistant\Services\AiAssistantService(
+  openAI: $llm,
+  bookingHandler: new AppBookingHandler(),   // or:
+);
+$ai->setBookingHandler(new AppBookingHandler());
+$ai->onInboundMessages($results);
+```
+
+Notes:
+- The handler runs **after** the reply is sent and the session is stored, so
+  it can't delay or break the customer-facing flow; host exceptions are
+  caught and logged by the package.
+- Extraction uses the LLM when configured, with a keyword fallback when not
+  (`BookingIntentExtractor` is also usable standalone).
+- Disable per deployment with `AI_ASSISTANT_BOOKING_HOOK=false`.
+- Timezone for relative dates ("Friday", "tomorrow"): `AI_ASSISTANT_TIMEZONE`
+  (fallback `APP_TIMEZONE`, then `UTC`).
+
 ### 5. Train
 
 ```bash

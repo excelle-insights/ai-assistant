@@ -6,6 +6,7 @@ namespace ExcelleInsights\AiAssistant\Services;
 
 use PDO;
 use ExcelleInsights\AiAssistant\Client\OpenAIClient;
+use ExcelleInsights\AiAssistant\Contracts\BookingHandlerInterface;
 use ExcelleInsights\AiAssistant\Contracts\LlmClientInterface;
 use ExcelleInsights\AiAssistant\Contracts\SystemContextProviderInterface;
 use ExcelleInsights\AiAssistant\Support\EnvLoader;
@@ -16,6 +17,7 @@ class AiAssistantService
 {
     private string $prefix;
     private string $waPrefix;
+    private ?BookingIntentExtractor $bookingExtractor = null;
 
     public function __construct(
         private ?PDO $pdo = null,
@@ -23,6 +25,7 @@ class AiAssistantService
         private ?LlmClientInterface $openAI = null,
         private ?KnowledgeService $knowledge = null,
         private ?SchemaService $schema = null,
+        private ?BookingHandlerInterface $bookingHandler = null,
     ) {
         EnvLoader::load();
         $this->prefix = TablePrefix::get();
@@ -40,6 +43,17 @@ class AiAssistantService
         }
         $this->knowledge = $knowledge ?? new KnowledgeService($this->pdo, $this->openAI);
         $this->schema = $schema ?? new SchemaService($this->pdo);
+    }
+
+    /**
+     * Register (or replace) the host's booking handler. The handler receives
+     * a BookingIntent whenever the assistant detects the customer wants to
+     * book — the host decides how to persist it.
+     */
+    public function setBookingHandler(?BookingHandlerInterface $handler): static
+    {
+        $this->bookingHandler = $handler;
+        return $this;
     }
 
     /**
@@ -213,6 +227,54 @@ class AiAssistantService
         // Persist session + self-learning Q&A
         $this->storeSession($conversationId, $companyId, $messageBody, $reply);
         $this->saveTraining($companyId, $messageBody, $reply);
+
+        // Booking hook: hand detected booking requests to the host app.
+        // Host failures must never break the reply/webhook — see method.
+        $this->maybeHandleBooking($conversationId, $companyId, $conv, $messageBody, $reply);
+    }
+
+    /**
+     * Detect a booking request in this turn and hand it to the host's
+     * BookingHandlerInterface (if registered and enabled).
+     *
+     * Runs after the reply is sent + session persisted, so it adds no risk
+     * to the customer-facing flow. Any host exception is swallowed (logged).
+     */
+    private function maybeHandleBooking(
+        int $conversationId,
+        int $companyId,
+        array $conv,
+        string $messageBody,
+        string $reply,
+    ): void {
+        if ($this->bookingHandler === null) {
+            return;
+        }
+        $enabled = $_ENV['AI_ASSISTANT_BOOKING_HOOK'] ?? $_ENV['AI_WHATSAPP_BOOKING_HOOK'] ?? 'true';
+        if ($enabled === 'false' || $enabled === '0') {
+            return;
+        }
+        try {
+            if ($this->bookingExtractor === null) {
+                $tz = $_ENV['AI_ASSISTANT_TIMEZONE'] ?? $_ENV['APP_TIMEZONE'] ?? 'UTC';
+                $this->bookingExtractor = new BookingIntentExtractor($this->openAI, $tz, LlmFactory::defaultModel());
+            }
+            $intent = $this->bookingExtractor->extract(
+                $companyId,
+                $conversationId,
+                (string) ($conv['contact_phone'] ?? ''),
+                ($conv['contact_name'] ?? null) !== null ? (string) $conv['contact_name'] : null,
+                $messageBody,
+                $reply,
+                ['channel' => 'whatsapp', 'conversation_id' => $conversationId],
+            );
+            if ($intent === null) {
+                return;
+            }
+            $this->bookingHandler->handleBookingIntent($intent);
+        } catch (\Throwable $e) {
+            error_log('AiAssistantService::maybeHandleBooking: ' . $e->getMessage());
+        }
     }
 
     private function sendText(int $conversationId, string $to, string $body): array
