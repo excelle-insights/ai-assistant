@@ -267,6 +267,7 @@ class AiAssistantService
                 $messageBody,
                 $reply,
                 ['channel' => 'whatsapp', 'conversation_id' => $conversationId],
+                $this->loadSession($conversationId),
             );
             if ($intent === null) {
                 return;
