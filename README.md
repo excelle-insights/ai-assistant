@@ -112,8 +112,10 @@ Creates (prefix from `TablePrefix::get()`, default `ai_assistant`):
 * `{prefix}_schema` (learned field descriptions)
 * `{prefix}_reference` (lookup summaries: services + prices, counts)
 
-Upgrading from `ai_whatsapp_*`? Migration `20260922000000` renames old → new,
-data preserved — see [`docs/08-llm-providers-and-rename.md`](docs/08-llm-providers-and-rename.md) §3.
+Upgrading from `ai_whatsapp_*`? The one-time rename migration (`20260922000000`,
+old → new, data preserved) has been retired now that existing installs are
+renamed — fresh installs only run the clean `ai_assistant_*` migrations.
+Historical steps: [`docs/08-llm-providers-and-rename.md`](docs/08-llm-providers-and-rename.md) §3.
 
 No `company_id` column added to vendor `whatsapp_*` tables.
 

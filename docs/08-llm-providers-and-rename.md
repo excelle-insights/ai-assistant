@@ -76,8 +76,12 @@ final class AnthropicClient implements LlmClientInterface {
 
 ## 3. Rename: `ai_whatsapp_*` → `ai_assistant_*` (step by step)
 
-Migration `database/migrations/20260922000000_rename_ai_whatsapp_to_ai_assistant.php`
-renames `knowledge, sessions, queue, training, schema, reference`, data preserved.
+> Retired: the one-time migration
+> `database/migrations/20260922000000_rename_ai_whatsapp_to_ai_assistant.php`
+> (renamed `knowledge, sessions, queue, training, schema, reference`, data
+> preserved) has been removed now that existing installs are renamed. Fresh
+> installs only run the clean `ai_assistant_*` migrations. Steps below are kept
+> for history.
 
 ```bash
 # 1. Deploy the new package code (migrations + TablePrefix + factory).
