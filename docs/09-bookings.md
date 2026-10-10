@@ -37,15 +37,18 @@ package prefix (`AI_ASSISTANT_TABLE_PREFIX`, default `ai_assistant`).
 
 ## Behaviour
 
-- When the AI detects a booking intent, `BookingService::recordFromIntent()`
-  writes (or reuses) the booking, assigns the booking number, and stores the
-  conversation turns.
+- A booking row is created **only after the customer confirms a complete
+  request** — a concrete service plus a date or an explicit confirmation. Simply
+  asking "can I book?" or still supplying details does **not** create a booking.
+- On confirmation, `BookingService::recordFromIntent()` writes (or reuses an
+  open) booking, assigns the booking number, and stores the conversation turns.
+  The number is available to the reply in the same turn.
 - Repeating the request for the same contact within the dedupe window reuses
-  the open booking and tops up missing service/date/name instead of duplicating.
-- On every turn the assistant loads the contact's recent bookings and injects
-  them as `CUSTOMER BOOKINGS` in the prompt, so "what about my previous
-  booking?" is answered from real data — the assistant is explicitly told not
-  to say a booking was not confirmed while a booking row exists.
+  the open (pending) booking and tops up missing service/date/name instead of
+  duplicating.
+- On a turn where the customer asks about an existing booking, the assistant
+  loads the contact's bookings as `CUSTOMER BOOKINGS`; it never announces them
+  unprompted.
 
 ## Host responsibilities (your app)
 
