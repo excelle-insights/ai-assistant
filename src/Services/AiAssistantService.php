@@ -140,6 +140,11 @@ class AiAssistantService
         $companyId = (int)($conv['company_id'] ?? 0);
         if (!$companyId) $companyId = $this->resolveCompanyId();
 
+        // Only persist a booking once the customer explicitly confirms a
+        // complete request. Runs before the reply so the booking number can be
+        // quoted back in the same turn.
+        $capturedBooking = $this->maybeCaptureBooking($conversationId, $companyId, $conv, $messageBody);
+
         // Knowledge + self-learned Q&A + schema + reference context
         $chunks = $this->knowledge->search($companyId, $messageBody, 5);
         $training = $this->recentTraining($companyId, $messageBody, 3);
@@ -148,13 +153,16 @@ class AiAssistantService
         $reference = $this->schema->allReference($companyId, 60);
         $ctx = $this->companyContext($companyId);
 
-        $customerBookings = $this->bookings->listForContact(
-            $companyId,
-            trim((string) ($conv['contact_phone'] ?? '')) ?: null,
-            trim((string) ($conv['contact_user_id'] ?? '')) ?: null,
-            5
-        );
+        $customerBookings = $this->messageMentionsBooking($messageBody)
+            ? $this->bookings->listForContact(
+                $companyId,
+                trim((string) ($conv['contact_phone'] ?? '')) ?: null,
+                trim((string) ($conv['contact_user_id'] ?? '')) ?: null,
+                5
+            )
+            : [];
         $bookingsTxt = $this->bookingsText($customerBookings);
+        $newBookingTxt = $capturedBooking !== null ? $this->bookingsText([$capturedBooking]) : '';
 
         $companyName = (string)($ctx['name'] ?? '');
         $servicesTxt = $this->servicesText($ctx['services'] ?? null);
@@ -169,8 +177,9 @@ class AiAssistantService
             . " When the customer asks what services/products/items are offered, list them from the AVAILABLE DATA."
             . " When the customer asks about a specific service/product or its price, find it in AVAILABLE DATA by meaning — ignore wording differences, paraphrasing and minor spelling mistakes (e.g. 'changing oil service' means 'Oil Change')."
             . " Only if you have no relevant data at all, politely say you will connect them to a team member."
-            . " When CUSTOMER BOOKINGS is present and the customer asks about a booking, quote its booking number, service, preferred date and status from that data."
-            . " Never tell a customer their booking was not confirmed when a CUSTOMER BOOKINGS entry exists; if it is pending, say it has been received and is awaiting confirmation."
+            . " Bookings: first collect the service and the preferred date; once you have both, summarise them and ask the customer to confirm. Do not create or announce a booking before the customer confirms."
+            . " Do not tell the customer a booking exists unless a NEW BOOKING block is provided below; when it is, quote its booking number and say the team will confirm the request."
+            . " Only mention CUSTOMER BOOKINGS when the customer asks about an existing booking — never announce them unprompted."
             . " Be concise and friendly. Do not use markdown.";
 
         $user = "";
@@ -185,6 +194,9 @@ class AiAssistantService
         }
         if ($bookingsTxt !== '') {
             $user .= "CUSTOMER BOOKINGS:\n" . $bookingsTxt . "\n\n";
+        }
+        if ($newBookingTxt !== '') {
+            $user .= "NEW BOOKING CREATED:\n" . $newBookingTxt . "\n\n";
         }
         $user .= "CUSTOMER MESSAGE:\n{$messageBody}\n\nReply:";
 
@@ -242,29 +254,21 @@ class AiAssistantService
         // Persist session + self-learning Q&A
         $this->storeSession($conversationId, $companyId, $messageBody, $reply);
         $this->saveTraining($companyId, $messageBody, $reply);
-
-        // Booking hook: hand detected booking requests to the host app.
-        // Host failures must never break the reply/webhook — see method.
-        $this->maybeHandleBooking($conversationId, $companyId, $conv, $messageBody, $reply);
     }
 
     /**
-     * Detect a booking request in this turn and hand it to the host's
-     * BookingHandlerInterface (if registered and enabled).
-     *
-     * Runs after the reply is sent + session persisted, so it adds no risk
-     * to the customer-facing flow. Any host exception is swallowed (logged).
+     * Persist a booking only after the customer confirms a complete request.
+     * Runs before the reply so the booking number can be quoted in the same
+     * turn. Returns the booking row, or null when nothing was created.
      */
-    private function maybeHandleBooking(
-        int $conversationId,
-        int $companyId,
-        array $conv,
-        string $messageBody,
-        string $reply,
-    ): void {
+    private function maybeCaptureBooking(int $conversationId, int $companyId, array $conv, string $messageBody): ?array
+    {
         $enabled = $_ENV['AI_ASSISTANT_BOOKING_HOOK'] ?? $_ENV['AI_WHATSAPP_BOOKING_HOOK'] ?? 'true';
         if ($enabled === 'false' || $enabled === '0') {
-            return;
+            return null;
+        }
+        if (!$this->messageMentionsBooking($messageBody) && !$this->looksLikeConfirmation($messageBody)) {
+            return null;
         }
         try {
             if ($this->bookingExtractor === null) {
@@ -277,25 +281,43 @@ class AiAssistantService
                 (string) ($conv['contact_phone'] ?? ''),
                 ($conv['contact_name'] ?? null) !== null ? (string) $conv['contact_name'] : null,
                 $messageBody,
-                $reply,
+                '',
                 ['channel' => 'whatsapp', 'conversation_id' => $conversationId, 'contact_user_id' => (string) ($conv['contact_user_id'] ?? '')],
                 $this->loadSession($conversationId),
             );
             if ($intent === null) {
-                return;
+                return null;
+            }
+            if (!$this->looksLikeConfirmation($messageBody)) {
+                return null;
+            }
+            if (trim((string) $intent->service) === '') {
+                return null;
             }
 
             $booking = $this->bookings->recordFromIntent($intent, $conv);
-            if ($booking !== null) {
-                $intent = $intent->withBooking((int) $booking['id'], (string) $booking['booking_number']);
+            if ($booking === null) {
+                return null;
             }
-
+            $intent = $intent->withBooking((int) $booking['id'], (string) $booking['booking_number']);
             if ($this->bookingHandler !== null) {
                 $this->bookingHandler->handleBookingIntent($intent);
             }
+            return $booking;
         } catch (\Throwable $e) {
-            error_log('AiAssistantService::maybeHandleBooking: ' . $e->getMessage());
+            error_log('AiAssistantService::maybeCaptureBooking: ' . $e->getMessage());
+            return null;
         }
+    }
+
+    private function looksLikeConfirmation(string $message): bool
+    {
+        return (bool) preg_match('/\b(confirm|confirmed|yes|yeah|yep|yup|sure|okay|ok|proceed|go ahead|book it|book me|please book|reserve|finali[sz]e|that works|works for me|ndio|sawa|correct)\b/i', $message);
+    }
+
+    private function messageMentionsBooking(string $message): bool
+    {
+        return (bool) preg_match('/\b(book|booking|booked|appointment|appointments|reservation|reserve|reschedule|previous|status|reference|ref)\b/i', $message);
     }
 
     private function bookingsText(array $bookings): string

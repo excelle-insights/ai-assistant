@@ -35,7 +35,7 @@ class BookingService
             return null;
         }
 
-        $existing = $this->findRecentForContact($intent->companyId, $phone !== '' ? $phone : null, $userId !== '' ? $userId : null);
+        $existing = $this->findOpenForContext($intent->companyId, $intent->conversationId, $phone !== '' ? $phone : null, $userId !== '' ? $userId : null);
         if ($existing) {
             $this->topUp((int) $existing['id'], $intent->contactName, $intent->service, $intent->preferredDate);
             $this->addMessage((int) $existing['id'], 'customer', $intent->contactName, $intent->messageBody, false);
@@ -65,7 +65,7 @@ class BookingService
             'contact_user_id'  => $userId !== '' ? $userId : null,
             'contact_phone'    => $phone !== '' ? $phone : null,
             'contact_name'     => $intent->contactName !== null && $intent->contactName !== '' ? $intent->contactName : null,
-            'service'          => $intent->service ?: mb_substr($intent->messageBody, 0, 500),
+            'service'          => $intent->service,
             'preferred_date'   => $intent->preferredDate,
             'source_message'   => $intent->messageBody,
             'ai_reply'         => $intent->aiReply,
@@ -104,6 +104,36 @@ class BookingService
                       AND created_at > DATE_SUB(NOW(), INTERVAL :days DAY)
                     ORDER BY id DESC LIMIT 1";
             $stmt = $this->pdo->prepare($sql);
+            $stmt->execute($params);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        } catch (\Throwable $e) {
+            return null;
+        }
+        return $row ?: null;
+    }
+
+    /**
+     * Find an open (pending) booking to reuse: same conversation first, then
+     * same contact. Only pending bookings are reused so a confirmed booking is
+     * never merged into a new request.
+     */
+    public function findOpenForContext(int $companyId, int $conversationId, ?string $phone, ?string $userId, int $days = 2): ?array
+    {
+        try {
+            if ($conversationId > 0) {
+                $stmt = $this->pdo->prepare("SELECT * FROM {$this->bookingsTable} WHERE company_id = :cid AND conversation_id = :conv AND status = 'pending' AND created_at > DATE_SUB(NOW(), INTERVAL :days DAY) ORDER BY id DESC LIMIT 1");
+                $stmt->execute(['cid' => $companyId, 'conv' => $conversationId, 'days' => $days]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC);
+                if ($row) {
+                    return $row;
+                }
+            }
+            [$where, $params] = $this->contactWhere($companyId, $phone, $userId);
+            if ($where === '') {
+                return null;
+            }
+            $params[':days'] = $days;
+            $stmt = $this->pdo->prepare("SELECT * FROM {$this->bookingsTable} WHERE {$where} AND status = 'pending' AND created_at > DATE_SUB(NOW(), INTERVAL :days DAY) ORDER BY id DESC LIMIT 1");
             $stmt->execute($params);
             $row = $stmt->fetch(PDO::FETCH_ASSOC);
         } catch (\Throwable $e) {
