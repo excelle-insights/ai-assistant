@@ -9,6 +9,7 @@ use ExcelleInsights\AiAssistant\Client\OpenAIClient;
 use ExcelleInsights\AiAssistant\Contracts\LlmClientInterface;
 use ExcelleInsights\AiAssistant\Contracts\SystemContextProviderInterface;
 use ExcelleInsights\AiAssistant\Services\AiAssistantService;
+use ExcelleInsights\AiAssistant\Services\BookingService;
 use ExcelleInsights\AiAssistant\Services\KnowledgeService;
 use ExcelleInsights\AiAssistant\Support\EnvLoader;
 
@@ -48,5 +49,15 @@ class AiAssistantManager
     public function getKnowledgeService(): KnowledgeService
     {
         return $this->knowledge;
+    }
+
+    public function getBookingService(): BookingService
+    {
+        return new BookingService($this->pdo);
+    }
+
+    public function bookings(): BookingService
+    {
+        return $this->getBookingService();
     }
 }

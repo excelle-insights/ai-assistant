@@ -22,6 +22,7 @@ never depends on a specific WhatsApp vendor package.
 | [06-configuration.md](06-configuration.md) | Every env key, table prefixes, rate limits |
 | [07-troubleshooting.md](07-troubleshooting.md) | Diagnostics endpoint, common failures and fixes |
 | [08-llm-providers-and-rename.md](08-llm-providers-and-rename.md) | Any LLM provider (OpenAI/OpenRouter/Ollama/…) + `ai_whatsapp_*` → `ai_assistant_*` rename |
+| [09-bookings.md](09-bookings.md) | Package-owned bookings, booking numbers, recall, host display/actions |
 
 ## 30-second mental model
 

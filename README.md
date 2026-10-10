@@ -34,6 +34,10 @@ providers + table rename).
   `AI_WHATSAPP_TABLE_PREFIX` still honoured) + `SystemContextProviderInterface`
   to pull host data without FK tangles. Rename migration included.
 * Async queue `ai_assistant_queue` + `whatsapp_conversations` / `whatsapp_messages` bridge.
+* Package-owned bookings (`ai_assistant_bookings` + `_booking_messages`) with a
+  booking number and per-contact recall — the assistant can quote a customer's
+  previous booking. Host handles display/actions via `BookingHandlerInterface`
+  ([`docs/09-bookings.md`](docs/09-bookings.md)).
 
 ---
 
@@ -169,13 +173,20 @@ Any app works here: any `PDO`, any `SystemContextProviderInterface`
 implementation, any `LlmClientInterface` (`LlmFactory::make()` or your own) —
 `ExcelleCore\*` above is just the MaintainA example.
 
-### 4b. Receive booking requests (host implements interface)
+### 4b. Bookings (package-owned)
 
-When a customer asks to book ("I want to book…", "nataka miadi…"), the
-package detects the intent, extracts the service + preferred date from the
-conversation, and hands a `Support\BookingIntent` to the host. The package
-never writes app tables — the host persists it however its domain requires
-(booking row, ticket, CRM lead).
+When a customer asks to book ("I want to book…", "nataka miadi…"), the package
+detects the intent, extracts the service + preferred date, and **persists the
+booking itself** in `{prefix}_bookings` (+ `{prefix}_booking_messages`), with a
+human-readable booking number (`BK-YYYYMMDD-00001`). On every turn the assistant
+loads the contact's bookings and can quote a previous one, so it never wrongly
+tells a customer their booking was not confirmed. See
+[`docs/09-bookings.md`](docs/09-bookings.md).
+
+Your app only handles what is app-specific — where to display bookings and what
+actions to take (confirm, reschedule, notify staff, link a vehicle/work order) —
+by implementing `BookingHandlerInterface`. The `BookingIntent` you receive
+already carries `bookingId` and `bookingNumber`.
 
 ```php
 // Host side, e.g. api/src/Services/AppBookingHandler.php
@@ -184,11 +195,22 @@ use ExcelleInsights\AiAssistant\Support\BookingIntent;
 
 class AppBookingHandler implements BookingHandlerInterface {
   public function handleBookingIntent(BookingIntent $intent): void {
-    // $intent->companyId, ->contactPhone, ->contactName, ->service,
+    // $intent->bookingId, ->bookingNumber (already persisted by the package)
+    // ->companyId, ->contactPhone, ->contactName, ->service,
     // ->preferredDate (Y-m-d or null), ->confidence, ->messageBody, ->aiReply
-    // De-dupe + insert into YOUR bookings table + notify staff here.
+    // Notify staff / link your domain rows here.
   }
 }
+```
+
+Display and act on bookings through the service:
+
+```php
+$bookings = $ai->bookings();                                    // BookingService
+$bookings->listForCompany($companyId, ['status' => 'pending']);
+$bookings->setStatus($id, 'confirmed');                         // customer confirmed
+$bookings->setPreferredDate($id, '2026-10-20');                 // customer picked a date
+$bookings->messages($id);                                       // thread
 ```
 
 Register it where you hook inbound (constructor or setter — both work):

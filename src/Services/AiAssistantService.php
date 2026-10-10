@@ -18,6 +18,7 @@ class AiAssistantService
     private string $prefix;
     private string $waPrefix;
     private ?BookingIntentExtractor $bookingExtractor = null;
+    private BookingService $bookings;
 
     public function __construct(
         private ?PDO $pdo = null,
@@ -43,6 +44,7 @@ class AiAssistantService
         }
         $this->knowledge = $knowledge ?? new KnowledgeService($this->pdo, $this->openAI);
         $this->schema = $schema ?? new SchemaService($this->pdo);
+        $this->bookings = new BookingService($this->pdo);
     }
 
     /**
@@ -146,6 +148,14 @@ class AiAssistantService
         $reference = $this->schema->allReference($companyId, 60);
         $ctx = $this->companyContext($companyId);
 
+        $customerBookings = $this->bookings->listForContact(
+            $companyId,
+            trim((string) ($conv['contact_phone'] ?? '')) ?: null,
+            trim((string) ($conv['contact_user_id'] ?? '')) ?: null,
+            5
+        );
+        $bookingsTxt = $this->bookingsText($customerBookings);
+
         $companyName = (string)($ctx['name'] ?? '');
         $servicesTxt = $this->servicesText($ctx['services'] ?? null);
 
@@ -159,6 +169,8 @@ class AiAssistantService
             . " When the customer asks what services/products/items are offered, list them from the AVAILABLE DATA."
             . " When the customer asks about a specific service/product or its price, find it in AVAILABLE DATA by meaning — ignore wording differences, paraphrasing and minor spelling mistakes (e.g. 'changing oil service' means 'Oil Change')."
             . " Only if you have no relevant data at all, politely say you will connect them to a team member."
+            . " When CUSTOMER BOOKINGS is present and the customer asks about a booking, quote its booking number, service, preferred date and status from that data."
+            . " Never tell a customer their booking was not confirmed when a CUSTOMER BOOKINGS entry exists; if it is pending, say it has been received and is awaiting confirmation."
             . " Be concise and friendly. Do not use markdown.";
 
         $user = "";
@@ -170,6 +182,9 @@ class AiAssistantService
         if ($queryResult !== null) {
             $user .= "DATABASE QUERY: " . $queryResult['sql'] . "\n";
             $user .= "QUERY RESULT: " . $this->formatRows($queryResult['rows']) . "\n\n";
+        }
+        if ($bookingsTxt !== '') {
+            $user .= "CUSTOMER BOOKINGS:\n" . $bookingsTxt . "\n\n";
         }
         $user .= "CUSTOMER MESSAGE:\n{$messageBody}\n\nReply:";
 
@@ -247,9 +262,6 @@ class AiAssistantService
         string $messageBody,
         string $reply,
     ): void {
-        if ($this->bookingHandler === null) {
-            return;
-        }
         $enabled = $_ENV['AI_ASSISTANT_BOOKING_HOOK'] ?? $_ENV['AI_WHATSAPP_BOOKING_HOOK'] ?? 'true';
         if ($enabled === 'false' || $enabled === '0') {
             return;
@@ -266,16 +278,47 @@ class AiAssistantService
                 ($conv['contact_name'] ?? null) !== null ? (string) $conv['contact_name'] : null,
                 $messageBody,
                 $reply,
-                ['channel' => 'whatsapp', 'conversation_id' => $conversationId],
+                ['channel' => 'whatsapp', 'conversation_id' => $conversationId, 'contact_user_id' => (string) ($conv['contact_user_id'] ?? '')],
                 $this->loadSession($conversationId),
             );
             if ($intent === null) {
                 return;
             }
-            $this->bookingHandler->handleBookingIntent($intent);
+
+            $booking = $this->bookings->recordFromIntent($intent, $conv);
+            if ($booking !== null) {
+                $intent = $intent->withBooking((int) $booking['id'], (string) $booking['booking_number']);
+            }
+
+            if ($this->bookingHandler !== null) {
+                $this->bookingHandler->handleBookingIntent($intent);
+            }
         } catch (\Throwable $e) {
             error_log('AiAssistantService::maybeHandleBooking: ' . $e->getMessage());
         }
+    }
+
+    private function bookingsText(array $bookings): string
+    {
+        if (!$bookings) {
+            return '';
+        }
+        $lines = [];
+        foreach ($bookings as $b) {
+            $parts = ['Booking ' . (string) ($b['booking_number'] ?? ('#' . ($b['id'] ?? '')))];
+            if (!empty($b['service'])) {
+                $parts[] = 'service: ' . $b['service'];
+            }
+            if (!empty($b['preferred_date'])) {
+                $parts[] = 'preferred date: ' . $b['preferred_date'];
+            }
+            $parts[] = 'status: ' . (string) ($b['status'] ?? 'pending');
+            if (!empty($b['created_at'])) {
+                $parts[] = 'created: ' . $b['created_at'];
+            }
+            $lines[] = '- ' . implode(', ', $parts);
+        }
+        return implode("\n", $lines);
     }
 
     private function sendText(int $conversationId, string $to, string $body): array

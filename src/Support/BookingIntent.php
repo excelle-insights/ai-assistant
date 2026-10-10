@@ -29,7 +29,28 @@ final class BookingIntent
         public readonly float $confidence = 0.0,
         /** Opaque extras for hosts (e.g. channel, language). No app schema. */
         public readonly array $extra = [],
+        /** Assigned by the package once the booking is persisted. */
+        public readonly ?int $bookingId = null,
+        public readonly ?string $bookingNumber = null,
     ) {
+    }
+
+    public function withBooking(int $id, string $number): self
+    {
+        return new self(
+            $this->companyId,
+            $this->conversationId,
+            $this->contactPhone,
+            $this->contactName,
+            $this->messageBody,
+            $this->aiReply,
+            $this->service,
+            $this->preferredDate,
+            $this->confidence,
+            $this->extra,
+            $id,
+            $number,
+        );
     }
 
     public function toArray(): array
@@ -45,6 +66,8 @@ final class BookingIntent
             'preferred_date' => $this->preferredDate,
             'confidence'     => $this->confidence,
             'extra'          => $this->extra,
+            'booking_id'     => $this->bookingId,
+            'booking_number' => $this->bookingNumber,
         ];
     }
 }
