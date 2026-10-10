@@ -97,14 +97,18 @@ class BookingService
             return null;
         }
         $params[':days'] = $days;
-        $sql = "SELECT * FROM {$this->bookingsTable}
-                WHERE {$where}
-                  AND status IN ('pending','confirmed','rescheduled')
-                  AND created_at > DATE_SUB(NOW(), INTERVAL :days DAY)
-                ORDER BY id DESC LIMIT 1";
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        try {
+            $sql = "SELECT * FROM {$this->bookingsTable}
+                    WHERE {$where}
+                      AND status IN ('pending','confirmed','rescheduled')
+                      AND created_at > DATE_SUB(NOW(), INTERVAL :days DAY)
+                    ORDER BY id DESC LIMIT 1";
+            $stmt = $this->pdo->prepare($sql);
+            $stmt->execute($params);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        } catch (\Throwable $e) {
+            return null;
+        }
         return $row ?: null;
     }
 
@@ -114,9 +118,13 @@ class BookingService
         if ($where === '') {
             return [];
         }
-        $stmt = $this->pdo->prepare("SELECT * FROM {$this->bookingsTable} WHERE {$where} ORDER BY id DESC LIMIT {$limit}");
-        $stmt->execute($params);
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        try {
+            $stmt = $this->pdo->prepare("SELECT * FROM {$this->bookingsTable} WHERE {$where} ORDER BY id DESC LIMIT {$limit}");
+            $stmt->execute($params);
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (\Throwable $e) {
+            return [];
+        }
     }
 
     public function get(int $id): ?array
