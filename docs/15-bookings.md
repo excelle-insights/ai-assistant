@@ -1,4 +1,4 @@
-# Bookings
+# 15 — Bookings
 
 Bookings live in the **package**, not in the host application. Every chat
 channel (WhatsApp today, web chat / in-app next) writes to the same booking
@@ -80,13 +80,26 @@ $bookings->messages((int) $booking['id']);         // conversation thread
 $bookings->addMessage((int) $booking['id'], 'staff', 'Agent Jane', 'We booked you for Monday.', false);
 ```
 
-## Env
+## Settings
 
-| Key | Default | Purpose |
-|-----|---------|---------|
-| `AI_ASSISTANT_TABLE_PREFIX` | `ai_assistant` | Prefix for bookings + all package tables |
-| `AI_ASSISTANT_BOOKING_HOOK` | `true` | Set `false` to disable booking detection/persistence |
-| `AI_ASSISTANT_TENANT_ID` | — | Fixed company id for single-tenant apps |
+| Setting | Column in `{prefix}_config` | Default | Purpose |
+|---------|-----------------------------|---------|---------|
+| `channels.whatsapp.booking_hook` | `channels_json` | `true` | `no` disables booking detection and persistence |
+| `channels.whatsapp.table_prefix` | `channels_json` | `whatsapp` | Host WhatsApp tables read for contact identity |
+| `AI_ASSISTANT_TABLE_PREFIX` (`.env`) | — | `ai_assistant` | Prefix for bookings and all package tables |
+| `AI_ASSISTANT_TENANT_ID` (`.env`) | — | — | Fixed company id for single-tenant apps |
+
+Set the behaviour through the API or your settings screen:
+
+```php
+$api->handle('config.save', [
+    'company_id' => 0,
+    'settings'   => ['channels.whatsapp.booking_hook' => 'no'], // yes/no/on/off/1/0
+]);
+```
+
+The legacy `AI_ASSISTANT_BOOKING_HOOK` / `AI_WHATSAPP_BOOKING_HOOK` keys still
+work as a break-glass env override; they are not needed in `.env` otherwise.
 
 ## Notes
 

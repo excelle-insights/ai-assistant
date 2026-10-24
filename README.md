@@ -1,322 +1,139 @@
-# Excelle Insights — AI Assistant Package
+# AI Assistant — embeddable trainable assistant (`excelle-insights/ai-assistant`)
 
-Standalone Composer package: one trainable AI core for WhatsApp auto-reply,
-in-app user guidance, diagnosis support and business analysis — same install
-pattern as `excelle-insights/whatsapp`, working with **any LLM provider**
-(OpenAI, OpenRouter, Ollama, Together, vLLM…), not just OpenAI.
+One PHP package that gives **any** application a trainable AI layer: chat that
+answers from your own data, your documents and your knowledge base — on the web,
+in WhatsApp, or in whatever channel you already run. Plain PHP + PDO, no
+framework, no required service except an OpenAI-compatible LLM endpoint.
 
-> Name history: folder/repo are now `ai-assistant`; own tables are
-> `ai_assistant_*`. The composer name `excelle-insights/ai-assistant` and the
-> PHP namespace `ExcelleInsights\AiAssistant\…` are kept until hosts migrate
-> (then they become `excelle-insights/ai-assistant` / `…\AiAssistant\…`).
-
-No edits to `vendor/excelle-insights/whatsapp` required.
-
-Full step-by-step guides live in [`docs/`](docs/README.md) (install, connect,
-knowledge, WhatsApp channel, one-AI router, config, troubleshooting, LLM
-providers + table rename).
-
----
-
-## Features
-
-* Hooks after `WhatsappService::processWebhookPayload()` — no vendor edit.
-* One AI for all channels: WhatsApp reply, knowledge-based user guide,
-  vehicle-diagnosis support, business analysis (host routes per intent).
-* Any LLM via `Contracts\LlmClientInterface` + `Support\LlmFactory`
-  (`LLM_PROVIDER=openai|openrouter|together|ollama|vllm|lmstudio|custom`).
-* Trainable per `company_id`: FAQs, services, pricing, How-To guides via
-  `ai_assistant_knowledge` (embeddings + keyword search) and self-learning
-  `ai_assistant_training`. No company model? Set `AI_ASSISTANT_TENANT_ID=0`
-  and pass `0` everywhere — `company_id` is only a scoping key, see
-  [`docs/02-connect-application.md`](docs/02-connect-application.md).
-* Own tables (`AI_ASSISTANT_TABLE_PREFIX`, default `ai_assistant`; legacy
-  `AI_WHATSAPP_TABLE_PREFIX` still honoured) + `SystemContextProviderInterface`
-  to pull host data without FK tangles. Rename migration included.
-* Async queue `ai_assistant_queue` + `whatsapp_conversations` / `whatsapp_messages` bridge.
-* Package-owned bookings (`ai_assistant_bookings` + `_booking_messages`) with a
-  booking number and per-contact recall — the assistant can quote a customer's
-  previous booking. Host handles display/actions via `BookingHandlerInterface`
-  ([`docs/09-bookings.md`](docs/09-bookings.md)).
-
----
-
-## Requirements
-
-* PHP >= 8.1, PDO MySQL, `ext-json`
-* For the WhatsApp channel: host app with `excelle-insights/whatsapp` tables
-  (`whatsapp_business_profiles`, `whatsapp_messages`, `whatsapp_conversations`,
-  `whatsapp_credentials`, `whatsapp_access_tokens`). Other channels need no
-  WhatsApp tables.
-* Host `.env` LLM (OpenAI default; alternatives in [`docs/08-llm-providers-and-rename.md`](docs/08-llm-providers-and-rename.md)):
-  ```
-  LLM_PROVIDER=openai
-  LLM_API_KEY=sk-proj-...        # or OPENAI_API_KEY (fallback)
-  LLM_MODEL=gpt-4o               # or OPENAI_MODEL (fallback)
-  OPENAI_WHISPER_MODEL=whisper-1
-  LLM_REQUEST_TIMEOUT=30
-  AI_RATE_LIMIT_PER_HOUR=60
-  ```
-* Host `.env` auto-reply + tables:
-  ```
-  # Toggle AI auto-reply for inbound WhatsApp messages. false/0 disables.
-  AI_ASSISTANT_AUTO_REPLY=true
-  # Canonical prefix for ai_assistant_knowledge / _sessions / _queue / _training / _schema / _reference.
-  AI_ASSISTANT_TABLE_PREFIX=ai_assistant
-  # Legacy fallbacks (pre-rename installs). Remove after migrating.
-  AI_WHATSAPP_TABLE_PREFIX=ai_whatsapp
-  # Optional fallback template id to queue when the 24h session window is closed.
-  # 0 = try direct send anyway (will fail if window closed). Set to an Approved
-  # whatsapp_templates.template_id to queue a template instead.
-  AI_ASSISTANT_FALLBACK_TEMPLATE=0
-  ```
-* Migrations need `DB_HOST` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` in host `.env`
-  (runtime PDO is injected by the host, or built from `DB_DSN` by the facade).
-
----
-
-## Installation
-
-### 1. Require via Composer
+The package never knows what your app does. It learns your tables, your wording
+and your permissions from your configuration and from the interfaces you
+implement, and it writes only to its own `ai_assistant_*` tables in **your**
+database. Nothing in `vendor/` is ever edited, and nothing about your domain is
+hardcoded here.
 
 ```bash
 composer require excelle-insights/ai-assistant
+php vendor/excelle-insights/ai-assistant/migrate.php   # creates its tables in your DB
 ```
 
-Or for local dev add to host `composer.json`:
+```php
+use ExcelleInsights\AiAssistant\Http\AssistantApi;
 
-```json
-"repositories": [
-  {"type": "vcs", "url": "/usr/local/var/www/ai-assistant"}
-],
-"require": {
-  "excelle-insights/ai-assistant": "*"
-}
+$api = new AssistantApi($pdo);                    // your existing PDO connection
+$api->handle('schema.train', ['options' => []]);  // learn your tables + columns
+$answer = $api->handle('chat', [
+    'question' => 'How many orders did we ship last month?',
+    'user'     => ['user_id' => '7', 'tenant_id' => 3, 'roles' => ['manager']],
+]);
+// $answer['answer']['text'], ['sql'], ['rows'], ['chart'], ['citations'], ['meta']['intent']
 ```
+
+## Configuration is mostly data
+
+`.env` holds only what is needed before a database connection exists — the DB
+credentials, the LLM endpoint/key, the table prefix and the assistant's name.
+Behaviour (which tables may be read, features, limits, charts, exports, WhatsApp,
+audit) lives in the package's `{prefix}_config` table and is edited from your own
+settings screen or SQL:
+
+```php
+$api->handle('config.describe', ['company_id' => 0]);   // every settable path + type
+$api->handle('config.save', ['company_id' => 0, 'settings' => [
+    'schema_policy.mode'           => 'allowlist',
+    'schema_policy.allowed_tables' => 'orders,customers',
+    'features'                     => 'data_qa,documents,charts,exports',
+]]);
+```
+
+A NULL value clears an override; booleans accept `yes`/`no`/`on`/`off`/`1`/`0`
+and lists accept CSV or arrays. Env keys still exist as a break-glass override
+and deliberately win over the table. Full reference:
+[docs/03-configuration.md](docs/03-configuration.md#settings-in-the-database).
+
+## What it does
+
+| Capability | Entry point | Needs from you |
+|---|---|---|
+| Answer a question from your database | `chat`, `query.run` | PDO, LLM key |
+| Learn your schema, keep your own column meanings | `schema.*` | nothing (optional: descriptions) |
+| Train from an uploaded SQL dump or a second DB | `schema.import-dump`, `trainFromConnection` | the dump / connection |
+| Knowledge base (FAQ, policies, prices) + CSV import | `knowledge.*` | nothing |
+| Document upload → extract → chunk → cite (PDF, DOCX, XLSX, images, audio) | `document.*` | extractors for binary formats |
+| Charts from any result set (14 types, ECharts-ready specs) | `chart.suggest`, `chart.build` | nothing |
+| Exports (CSV/TSV/JSON built in; XLSX/PDF via your exporter) with approval gates | `export.*` | a writable directory |
+| Saved reports, cron schedules, shared links | `report.*`, `schedule.*` | a runner + delivery |
+| Data-changing actions with confirm tokens + idempotency | `action.*` | `ActionHandlerInterface` |
+| Outbox for queued notifications with retries | `outbox.*` | `NotificationInterface` |
+| WhatsApp / any channel auto-reply | `whatsapp.*`, `ChannelInterface` | a sender |
+| Package-owned bookings (booking number, per-contact recall) | booking detection in the WhatsApp pipeline, `bookings()` | `BookingHandlerInterface` for display/actions |
+| Audit trail, usage counters, rate limits, per-tenant settings, feedback queue | `audit.*`, `usage.*`, `limit.*`, `settings.*`, `feedback.*` | nothing |
+| Conversation history, transcripts, share links, summaries | `conversation.*` | its own tables |
+
+Each row is documented in its own guide — see [docs/](docs/README.md); bookings
+specifically in [docs/15-bookings.md](docs/15-bookings.md).
+
+## What it does not do (yet)
+
+Honesty over marketing: these are **not implemented** in this package.
+
+* Lead scoring, forecasting, churn detection — no such service exists here.
+* No built-in XLSX / PDF / DOCX writer, no built-in OCR or audio transcription.
+  The package ships interfaces (`ExporterInterface`, `TextExtractorInterface`)
+  and your app — which already owns PhpSpreadsheet, html2pdf, Tesseract — plugs
+  them in. `csv`, `tsv`, `json` are written by the package itself.
+* Runtime SQL is written for **MySQL and SQLite**. Migrations use the
+  adapter-agnostic Phinx API, so they will build tables for Postgres or SQL
+  Server, but the package's own queries assume MySQL/SQLite quoting.
+* No HTTP layer, no auth, no UI. It returns arrays; your router, session and
+  frontend decide status codes and pixels.
+
+## Requirements
+
+* PHP >= 8.1 with `pdo` and `json`. `ext-pdo_mysql` (or `ext-pdo_sqlite`) for the DB.
+* Any OpenAI-compatible chat endpoint (`/chat/completions`). Embeddings, vision
+  and audio endpoints are optional and each feature degrades without them.
+* Composer `require-dev` `robmorgan/phinx` only to run migrations. No required
+  runtime dependency is added to your autoloader beyond the package itself.
+
+## Guides
+
+Start with [docs/README.md](docs/README.md) for the reading order.
+
+1. [Installation & migrations](docs/01-installation.md) — what tables appear, how to re-run safely, `composer update` automation
+2. [Connecting your application](docs/02-connect-application.md) — `AssistantApi`, every host interface, hooks, user context
+3. [Configuration & environment](docs/03-configuration.md) — the whole config tree, precedence, every env key
+4. [Schema training & column descriptions](docs/04-schema-training.md) — teach the assistant what your columns mean
+5. [Knowledge & documents](docs/05-knowledge-and-documents.md) — FAQ training, CSV import, uploads, retrieval
+6. [Data questions, analysis & charts](docs/06-data-and-charts.md) — semantic layer, query plans, visualisation
+7. [Exports](docs/07-exports.md) — formats, approval gates, download tokens, host exporters
+8. [Reports & schedules](docs/08-reports-and-schedules.md) — saved reports, cron delivery, feedback loop
+9. [Actions & outbox](docs/09-actions-and-outbox.md) — safe writes into your app, queued notifications
+10. [Channels & WhatsApp](docs/10-channels-and-whatsapp.md) — inbound handling, auto-reply, legacy service
+11. [Governance](docs/11-governance.md) — audit, usage, rate limits, settings, conversations, retention
+12. [API reference](docs/12-api-reference.md) — every method, every `handle()` action, the `ok`/`error` contract
+13. [LLM providers](docs/13-llm-providers.md) — OpenAI, OpenRouter, Ollama, vLLM, DeepSeek, local
+14. [Troubleshooting](docs/14-troubleshooting.md) — failures you will actually see, and what they mean
+15. [Bookings](docs/15-bookings.md) — package-owned bookings, booking numbers, recall, host actions
+
+## Development
 
 ```bash
-composer update excelle-insights/ai-assistant
+cd /path/to/ai-assistant
+composer install            # dev: phinx
+php tests/run.php           # every suite, no DB or network needed
 ```
 
-### 2. Run package migrations (own `phinx.php`, like `whatsapp` package)
+The suites are plain PHP scripts with their own assertions (no PHPUnit):
+`assistant`, `api`, `schema`, `knowledge`, `semantic`, `exports`, `actions`,
+`channels`, `governance`, `config`, `conversation`. They run against SQLite in a
+temp file, so `composer install && php tests/run.php` is green on a clean machine.
+
+To try the migrations locally:
 
 ```bash
-# AI package tables:
-vendor/bin/phinx migrate -c vendor/excelle-insights/ai-assistant/phinx.php
-
-# Or from package dir:
-cd /usr/local/var/www/ai-assistant && vendor/bin/phinx migrate -c phinx.php
+DB_ADAPTER=sqlite DB_NAME=/tmp/ai_mig.sqlite php migrate.php
 ```
 
-Creates (prefix from `TablePrefix::get()`, default `ai_assistant`):
-* `{prefix}_knowledge` (`company_id`, `category`, `title`, `content`, `embedding`, `source`, `status`)
-* `{prefix}_sessions` (`conversation_id`, `company_id`, `history_json`, `expires_at`)
-* `{prefix}_queue` (`conversation_id`, `wa_message_id`, `status`, `payload`, `attempts`, `error`)
-* `{prefix}_training` (`company_id`, `question`, `answer`)
-* `{prefix}_schema` (learned field descriptions)
-* `{prefix}_reference` (lookup summaries: services + prices, counts)
-
-Upgrading from `ai_whatsapp_*`? The one-time rename migration (`20260922000000`,
-old → new, data preserved) has been retired now that existing installs are
-renamed — fresh installs only run the clean `ai_assistant_*` migrations.
-Historical steps: [`docs/08-llm-providers-and-rename.md`](docs/08-llm-providers-and-rename.md) §3.
-
-No `company_id` column added to vendor `whatsapp_*` tables.
-
-### 3. Hook inbound (host adds 2 lines, no vendor edit)
-
-In `api/whatsapp/callback.php` and `api/src/Controllers/WhatsappController.php::webhookProcess()` after `WhatsappService::processWebhookPayload($payload)`:
-
-```php
-if (class_exists(\ExcelleInsights\AiAssistant\Facade\AiAssistantManager::class)) {
-    (new \ExcelleInsights\AiAssistant\Services\AiAssistantService())->onInboundMessages($results);
-}
-```
-
-`$results` is the array returned by `processWebhookPayload` (`['type'=>'message', 'wa_message_id'=>..., 'conversation_id'=>...]`).
-
-### 4. Provide system context (host implements interface)
-
-```php
-// api/src/Services/MaintainaContextProvider.php
-use ExcelleInsights\AiAssistant\Contracts\SystemContextProviderInterface;
-
-class MaintainaContextProvider implements SystemContextProviderInterface {
-  public function getCompanyContext(int $companyId): array {
-    $db = \ExcelleCore\Core\Database::getInstance()->getConnection();
-    $row = $db->query("SELECT name FROM companies WHERE id=$companyId")->fetch();
-    return ['name'=>$row['name'], 'services'=> $db->query("SELECT name FROM service_types WHERE company_id=$companyId")->fetchAll(PDO::FETCH_COLUMN)];
-  }
-  public function getCustomerContext(int $conversationId): array { /* last 3 service_records like AiController.php:604 */ return []; }
-  public function getCompanyKnowledge(int $companyId, string $query, int $k=5): array { /* FTS over ai_assistant_knowledge */ return []; }
-  public function canAutoReply(int $conversationId): bool { return true; } // business hours, opt-in
-}
-```
-
-Pass to manager (any `LlmClientInterface` accepted — use `LlmFactory::make()`
-for env-driven provider selection):
-
-```php
-use ExcelleInsights\AiAssistant\Support\LlmFactory;
-
-$ai = new \ExcelleInsights\AiAssistant\Facade\AiAssistantManager(
-  pdo: \ExcelleCore\Core\Database::getInstance()->getConnection(),
-  contextProvider: new MaintainaContextProvider(),
-  openAI: LlmFactory::make() // or new \ExcelleCore\AI\OpenAIClient() to reuse host's
-);
-```
-
-If you don't provide `openAI`, the package builds one via `LlmFactory::make()`
-reading `LLM_*` (fallback `OPENAI_*`) from host `.env`.
-
-Any app works here: any `PDO`, any `SystemContextProviderInterface`
-implementation, any `LlmClientInterface` (`LlmFactory::make()` or your own) —
-`ExcelleCore\*` above is just the MaintainA example.
-
-### 4b. Bookings (package-owned)
-
-When a customer asks to book ("I want to book…", "nataka miadi…"), the package
-detects the intent, extracts the service + preferred date, and **persists the
-booking itself** in `{prefix}_bookings` (+ `{prefix}_booking_messages`), with a
-human-readable booking number (`BK-YYYYMMDD-00001`). On every turn the assistant
-loads the contact's bookings and can quote a previous one, so it never wrongly
-tells a customer their booking was not confirmed. See
-[`docs/09-bookings.md`](docs/09-bookings.md).
-
-Your app only handles what is app-specific — where to display bookings and what
-actions to take (confirm, reschedule, notify staff, link a vehicle/work order) —
-by implementing `BookingHandlerInterface`. The `BookingIntent` you receive
-already carries `bookingId` and `bookingNumber`.
-
-```php
-// Host side, e.g. api/src/Services/AppBookingHandler.php
-use ExcelleInsights\AiAssistant\Contracts\BookingHandlerInterface;
-use ExcelleInsights\AiAssistant\Support\BookingIntent;
-
-class AppBookingHandler implements BookingHandlerInterface {
-  public function handleBookingIntent(BookingIntent $intent): void {
-    // $intent->bookingId, ->bookingNumber (already persisted by the package)
-    // ->companyId, ->contactPhone, ->contactName, ->service,
-    // ->preferredDate (Y-m-d or null), ->confidence, ->messageBody, ->aiReply
-    // Notify staff / link your domain rows here.
-  }
-}
-```
-
-Display and act on bookings through the service:
-
-```php
-$bookings = $ai->bookings();                                    // BookingService
-$bookings->listForCompany($companyId, ['status' => 'pending']);
-$bookings->setStatus($id, 'confirmed');                         // customer confirmed
-$bookings->setPreferredDate($id, '2026-10-20');                 // customer picked a date
-$bookings->messages($id);                                       // thread
-```
-
-Register it where you hook inbound (constructor or setter — both work):
-
-```php
-$ai = new \ExcelleInsights\AiAssistant\Services\AiAssistantService(
-  openAI: $llm,
-  bookingHandler: new AppBookingHandler(),   // or:
-);
-$ai->setBookingHandler(new AppBookingHandler());
-$ai->onInboundMessages($results);
-```
-
-Notes:
-- The handler runs **after** the reply is sent and the session is stored, so
-  it can't delay or break the customer-facing flow; host exceptions are
-  caught and logged by the package.
-- Extraction uses the LLM when configured, with a keyword fallback when not
-  (`BookingIntentExtractor` is also usable standalone).
-- Disable per deployment with `AI_ASSISTANT_BOOKING_HOOK=false`.
-- Timezone for relative dates ("Friday", "tomorrow"): `AI_ASSISTANT_TIMEZONE`
-  (fallback `APP_TIMEZONE`, then `UTC`).
-
-### 5. Train
-
-```bash
-curl -X POST https://host/api/integrations/whatsapp/ai-knowledge/import \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"csv":"category,title,content\n\"Working Hours\",\"Opening hours\",\"Mon-Fri 8am-5pm, Sat 8-12\""}'
-```
-
-Or via service:
-
-```php
-use ExcelleInsights\AiAssistant\Services\KnowledgeService;
-use ExcelleInsights\AiAssistant\Services\TrainingService;
-
-$knowledge = new KnowledgeService($pdo, LlmFactory::make());
-$training = new TrainingService($pdo, $knowledge);
-$training->ingest($companyId, "Return Policy", "30 days...", "manual");
-```
-
-File import: `POST https://host/api/integrations/whatsapp/ai-knowledge/import`
-(CSV; see [`docs/03-knowledge-training.md`](docs/03-knowledge-training.md)).
-
----
-
-## Configuration
-
-`config/ai-assistant.php` (publish to host `config/` if needed):
-
-```php
-return [
-  'table_prefix' => $_ENV['AI_ASSISTANT_TABLE_PREFIX'] ?? $_ENV['AI_WHATSAPP_TABLE_PREFIX'] ?? 'ai_assistant',
-  'llm' => [ // canonical — any OpenAI-compatible provider (see Support\LlmFactory)
-    'provider' => $_ENV['LLM_PROVIDER'] ?? 'openai',
-    'api_key' => $_ENV['LLM_API_KEY'] ?? $_ENV['OPENAI_API_KEY'] ?? '',
-    'base_url' => $_ENV['LLM_BASE_URL'] ?? $_ENV['OPENAI_BASE_URL'] ?? null,
-    'model' => $_ENV['LLM_MODEL'] ?? $_ENV['OPENAI_MODEL'] ?? 'gpt-4o',
-    'embedding_model' => $_ENV['LLM_EMBEDDING_MODEL'] ?? 'text-embedding-3-small',
-    'timeout' => (int)($_ENV['LLM_REQUEST_TIMEOUT'] ?? $_ENV['OPENAI_REQUEST_TIMEOUT'] ?? 30),
-    'whisper_model' => $_ENV['OPENAI_WHISPER_MODEL'] ?? 'whisper-1',
-  ],
-  'auto_reply' => [
-    'enabled' => ($_ENV['AI_ASSISTANT_AUTO_REPLY'] ?? $_ENV['AI_WHATSAPP_AUTO_REPLY'] ?? 'true') !== 'false',
-    'outside_session_use_template' => true, // 24h window → queue template
-    'fallback_template_id' => (int)($_ENV['AI_WHATSAPP_FALLBACK_TEMPLATE'] ?? 0),
-  ],
-];
-```
-
----
-
-## How It Works
-
-1. **Inbound** `POST /api/integrations/whatsapp/webhook` (router flattened `{field,value}`) → `WhatsappService::processWebhookPayload()` inserts `whatsapp_messages` `direction=inbound` + `whatsapp_conversations` + `events`.
-2. **Hook** calls `AiAssistantService::onInboundMessages()` for each new `wa_message_id`.
-3. **Context** via `SystemContextProvider` + **Knowledge** via `KnowledgeService::search($companyId, $messageBody, 5)`.
-4. **Prompt** built and sent via the configured LLM (`LlmClientInterface::chat()`, default model from `LlmFactory::defaultModel()`).
-5. **Reply** via `WhatsappApi::sendTextMessage($from, $reply)` if `isSessionActive()` else enqueue to `whatsapp_queue` with template.
-
-Same core answers guide/diagnosis/analysis requests — the host routes per
-intent (see [`docs/05-one-ai-router.md`](docs/05-one-ai-router.md)).
-
----
-
-## Pushing Changes
-
-```bash
-cd /usr/local/var/www/ai-assistant
-git add .
-git commit -m "feat: ..."
-git push origin main   # origin = git@github.com:excelle-insights/ai-assistant.git
-
-# Host picks it up:
-cd /path/to/host/api && composer update excelle-insights/ai-assistant
-```
-
-(Cutting over to composer name `excelle-insights/ai-assistant` happens as a
-separate versioned step once hosts are ready.)
-
----
-
-## References
-
-* Step-by-step: [`docs/`](docs/README.md) (esp. `08-llm-providers-and-rename.md`)
-* Black-box proposal: [`BLACKBOX_DECOUPLING_PROPOSAL.md`](BLACKBOX_DECOUPLING_PROPOSAL.md)
-* Host AI: `api/src/Controllers/AiController.php` `callAI()`, host `.env` `OPENAI_*` / `LLM_*`
-* WhatsApp vendor: `api/vendor/excelle-insights/whatsapp/src/Facade/WhatsAppManager.php`, `WHATSAPP_MIGRATION_NOTES.md` (host docs)
+`BLACKBOX_DECOUPLING_PROPOSAL.md` is a historical design note from the
+pre-rename days. The guides in `docs/` are the current contract; where the two
+disagree, `docs/` wins.
