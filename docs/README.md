@@ -28,6 +28,7 @@ depends on a specific messaging vendor.
 | 12 | [API reference](12-api-reference.md) | Every `handle()` action, public method, payload and error code |
 | 13 | [LLM providers](13-llm-providers.md) | OpenAI-compatible endpoints, local models, failure behaviour |
 | 14 | [Troubleshooting](14-troubleshooting.md) | Failures you will actually see, and what they mean |
+| 15 | [Bookings](15-bookings.md) | Package-owned bookings, booking numbers, per-contact recall, host actions |
 
 These guides are the current contract. `BLACKBOX_DECOUPLING_PROPOSAL.md` in the
 repository root is a historical design note; where the two disagree, `docs/`

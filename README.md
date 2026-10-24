@@ -65,10 +65,12 @@ and deliberately win over the table. Full reference:
 | Data-changing actions with confirm tokens + idempotency | `action.*` | `ActionHandlerInterface` |
 | Outbox for queued notifications with retries | `outbox.*` | `NotificationInterface` |
 | WhatsApp / any channel auto-reply | `whatsapp.*`, `ChannelInterface` | a sender |
+| Package-owned bookings (booking number, per-contact recall) | booking detection in the WhatsApp pipeline, `bookings()` | `BookingHandlerInterface` for display/actions |
 | Audit trail, usage counters, rate limits, per-tenant settings, feedback queue | `audit.*`, `usage.*`, `limit.*`, `settings.*`, `feedback.*` | nothing |
 | Conversation history, transcripts, share links, summaries | `conversation.*` | its own tables |
 
-Each row is documented in its own guide — see [docs/](docs/README.md).
+Each row is documented in its own guide — see [docs/](docs/README.md); bookings
+specifically in [docs/15-bookings.md](docs/15-bookings.md).
 
 ## What it does not do (yet)
 
@@ -111,6 +113,7 @@ Start with [docs/README.md](docs/README.md) for the reading order.
 12. [API reference](docs/12-api-reference.md) — every method, every `handle()` action, the `ok`/`error` contract
 13. [LLM providers](docs/13-llm-providers.md) — OpenAI, OpenRouter, Ollama, vLLM, DeepSeek, local
 14. [Troubleshooting](docs/14-troubleshooting.md) — failures you will actually see, and what they mean
+15. [Bookings](docs/15-bookings.md) — package-owned bookings, booking numbers, recall, host actions
 
 ## Development
 

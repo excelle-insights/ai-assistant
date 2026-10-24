@@ -96,6 +96,7 @@ company model just uses `0`.
 | `{prefix}_report_definitions`, `{prefix}_schedules` | saved reports and their cron schedules |
 | `{prefix}_feedback` | ratings and corrections with a review queue |
 | `{prefix}_rate_limits` | durable counters behind `limit.check` |
+| `{prefix}_bookings`, `{prefix}_booking_messages` | package-owned bookings with a human-readable booking number, plus their chat turns |
 | `{prefix}_sessions`, `{prefix}_queue` | **legacy** — only an existing WhatsApp host uses them; a new install ignores them |
 
 Check from inside your app whenever you like:
