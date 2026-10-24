@@ -12,15 +12,21 @@ use ExcelleInsights\AiAssistant\Services\TrainingService;
 use ExcelleInsights\AiAssistant\Support\EnvLoader;
 
 /**
- * Framework-agnostic training API.
+ * Framework-agnostic training API: knowledge CRUD, CSV import, schema sync.
  *
  * No routing, no request/response objects, no auth — plain arrays in/out —
  * so ANY application (Laravel, Slim, raw PHP, …) exposes training endpoints
- * in ~5 lines per route (see docs/03-knowledge-training.md §6). Auth,
+ * in ~5 lines per route (see docs/05-knowledge-and-documents.md). Auth,
  * tenancy and JSON encoding stay in the host.
  *
  * All methods return plain arrays; lists are `['items' => [...]]`,
- * imports are `['inserted' => n, 'skipped' => n, 'errors' => [...]]`.
+ * imports are `['inserted' => n, 'skipped' => n, 'errors' => [...]]`. Unlike
+ * AssistantApi these carry no `ok`/`error` envelope and take no host
+ * interfaces — new hosts should use AssistantApi's `knowledge.*` and
+ * `schema.*` actions, which are the same operations plus policy, audit and
+ * scoped errors.
+ *
+ * @see \ExcelleInsights\AiAssistant\Http\AssistantApi
  */
 class KnowledgeApi
 {

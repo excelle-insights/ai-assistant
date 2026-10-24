@@ -9,6 +9,7 @@ use ExcelleInsights\AiAssistant\Client\OpenAIClient;
 use ExcelleInsights\AiAssistant\Contracts\BookingHandlerInterface;
 use ExcelleInsights\AiAssistant\Contracts\LlmClientInterface;
 use ExcelleInsights\AiAssistant\Contracts\SystemContextProviderInterface;
+use ExcelleInsights\AiAssistant\Support\Config;
 use ExcelleInsights\AiAssistant\Support\EnvLoader;
 use ExcelleInsights\AiAssistant\Support\LlmFactory;
 use ExcelleInsights\AiAssistant\Support\TablePrefix;
@@ -18,6 +19,8 @@ class AiAssistantService
     private string $prefix;
     private string $waPrefix;
     private ?BookingIntentExtractor $bookingExtractor = null;
+    /** @var (callable(string,string,array<string,mixed>):(bool|array<string,mixed>))|null */
+    private $transport = null;
 
     public function __construct(
         private ?PDO $pdo = null,
@@ -29,7 +32,7 @@ class AiAssistantService
     ) {
         EnvLoader::load();
         $this->prefix = TablePrefix::get();
-        $this->waPrefix = $_ENV['WHATSAPP_TABLE_PREFIX'] ?? 'whatsapp';
+        $this->waPrefix = (string) ($_ENV['WHATSAPP_TABLE_PREFIX'] ?? Config::get('channels.whatsapp.table_prefix', 'whatsapp'));
         if (!$pdo) {
             $dsn = $_ENV['DB_DSN'] ?? null;
             $user = $_ENV['DB_USER'] ?? null;
@@ -57,6 +60,23 @@ class AiAssistantService
     }
 
     /**
+     * Register the host's own WhatsApp transport — the seam that keeps this class
+     * off anyone's SDK. Without it the legacy behaviour stays: use
+     * \Packages\Integrations\Whatsapp\WhatsappApi when that class exists, and
+     * otherwise queue the reply for the host's async sender.
+     *
+     *     $ai->setTransport(fn (string $to, string $body, array $meta) =>
+     *         ['ok' => TwilioApi::send($to, $body)]);
+     *
+     * @param callable(string,string,array<string,mixed>):(bool|array<string,mixed>)|null $transport
+     */
+    public function setTransport(?callable $transport): static
+    {
+        $this->transport = $transport;
+        return $this;
+    }
+
+    /**
      * Called by host after WhatsappService::processWebhookPayload() — $results is that return value.
      * $results = [['type'=>'message','wa_message_id'=>..., 'conversation_id'=>...], ...]
      */
@@ -77,8 +97,7 @@ class AiAssistantService
 
     public function onInboundMessage(int $conversationId, string $waMessageId): void
     {
-        $autoEnabled = $_ENV['AI_ASSISTANT_AUTO_REPLY'] ?? $_ENV['AI_WHATSAPP_AUTO_REPLY'] ?? 'true';
-        if ($autoEnabled === 'false' || $autoEnabled === '0') {
+        if (!Config::bool('channels.whatsapp.auto_reply', true)) {
             $this->markStatus($conversationId, $waMessageId, 'disabled', 'Auto-reply is turned off');
             return;
         }
@@ -208,7 +227,7 @@ class AiAssistantService
         if ($inSession) {
             [$sentOk, $sendError] = $this->sendText($conversationId, $conv['contact_phone'], $reply);
         } else {
-            $tplId = (int)($_ENV['AI_ASSISTANT_FALLBACK_TEMPLATE'] ?? $_ENV['AI_WHATSAPP_FALLBACK_TEMPLATE'] ?? 0);
+            $tplId = Config::int('channels.whatsapp.fallback_template_id', 0);
             if ($tplId) {
                 $this->pdo->prepare("INSERT INTO {$this->waPrefix}_queue (lead_id, contact_phone, contact_name, template_id, placeholders_data, status, author_id, created_at) VALUES (0, :phone, :name, :tid, :ph, 'pending', 0, NOW())")
                     ->execute(['phone' => $conv['contact_phone'], 'name' => $conv['contact_name'] ?? null, 'tid' => $tplId, 'ph' => json_encode([$reply])]);
@@ -250,8 +269,7 @@ class AiAssistantService
         if ($this->bookingHandler === null) {
             return;
         }
-        $enabled = $_ENV['AI_ASSISTANT_BOOKING_HOOK'] ?? $_ENV['AI_WHATSAPP_BOOKING_HOOK'] ?? 'true';
-        if ($enabled === 'false' || $enabled === '0') {
+        if (!Config::bool('channels.whatsapp.booking_hook', true)) {
             return;
         }
         try {
@@ -278,8 +296,24 @@ class AiAssistantService
         }
     }
 
+    /**
+     * @return array{0: bool, 1: ?string} [sent, error]
+     */
     private function sendText(int $conversationId, string $to, string $body): array
     {
+        if ($this->transport !== null) {
+            try {
+                $res = ($this->transport)($to, $body, ['conversation_id' => $conversationId, 'channel' => 'whatsapp']);
+            } catch (\Throwable $e) {
+                return [false, $e->getMessage()];
+            }
+            $ok = is_array($res) ? (bool) ($res['ok'] ?? $res['success'] ?? false) : (bool) $res;
+            $error = is_array($res) && isset($res['error']) && is_scalar($res['error']) ? (string) $res['error'] : null;
+            $this->recordOutbound($conversationId, $body, $ok, $error);
+
+            return [$ok, $ok ? null : ($error ?? 'the WhatsApp transport refused the message')];
+        }
+
         if (class_exists(\Packages\Integrations\Whatsapp\WhatsappApi::class)) {
             $res = \Packages\Integrations\Whatsapp\WhatsappApi::sendTextMessage($to, $body);
             $now = date('Y-m-d H:i:s');
@@ -296,6 +330,24 @@ class AiAssistantService
         $this->pdo->prepare("INSERT INTO {$this->prefix}_queue (conversation_id, wa_message_id, status, payload, created_at) VALUES (:cid, :wamid, 'pending', :payload, NOW())")
             ->execute(['cid' => $conversationId, 'wamid' => uniqid('ai_'), 'payload' => json_encode(['to' => $to, 'body' => $body])]);
         return [true, null];
+    }
+
+    /**
+     * Log the reply in the host's WhatsApp tables when it keeps them. Hosts with
+     * their own message log simply have nothing to insert here, and a missing
+     * table must never turn a delivered reply into a failure.
+     */
+    private function recordOutbound(int $conversationId, string $body, bool $ok, ?string $error): void
+    {
+        $now = date('Y-m-d H:i:s');
+        try {
+            $this->pdo->prepare("INSERT INTO {$this->waPrefix}_messages (conversation_id, direction, message_body, message_type, delivery_status, sent_at, author_id) VALUES (:cid, 'outbound', :body, 'text', :status, :now, 0)")
+                ->execute(['cid' => $conversationId, 'body' => $body, 'status' => $ok ? 'sent' : 'failed', 'now' => $now]);
+            $this->pdo->prepare("UPDATE {$this->waPrefix}_conversations SET last_message_at = :now WHERE conversation_id = :cid")
+                ->execute(['now' => $now, 'cid' => $conversationId]);
+        } catch (\Throwable $e) {
+            error_log('AiAssistantService::recordOutbound: ' . $e->getMessage() . ($error !== null ? ' (send error: ' . $error . ')' : ''));
+        }
     }
 
     private function markStatus(int $conversationId, string $waMessageId, string $status, ?string $error): void
@@ -337,7 +389,7 @@ class AiAssistantService
         $history[] = ['role' => 'assistant', 'content' => $out];
 
         // Keep a bounded window so the prompt stays small (turn = user + assistant).
-        $maxTurns = (int)($_ENV['AI_ASSISTANT_SESSION_TURNS'] ?? $_ENV['AI_WHATSAPP_SESSION_TURNS'] ?? 10);
+        $maxTurns = Config::int('limits.session_turns', 10);
         if ($maxTurns < 1) $maxTurns = 10;
         if (count($history) > $maxTurns * 2) {
             $history = array_slice($history, -($maxTurns * 2));
@@ -348,8 +400,15 @@ class AiAssistantService
             ->execute(['cid' => $conversationId, 'comp' => $companyId, 'hist' => $json, 'hist2' => $json]);
     }
 
+    /**
+     * Keep the answered exchange as training material — unless the host turned
+     * self-training off with knowledge.self_training.
+     */
     private function saveTraining(int $companyId, string $question, string $answer): void
     {
+        if (!Config::bool('knowledge.self_training', true)) {
+            return;
+        }
         $table = $this->prefix . '_training';
         try {
             $this->pdo->prepare("INSERT INTO {$table} (company_id, question, answer, created_at) VALUES (:cid, :q, :a, NOW())")
@@ -389,7 +448,7 @@ class AiAssistantService
 
         try {
             $res = $this->openAI->chat([
-                ['role' => 'system', 'content' => "You are a MySQL query generator for a workshop/garage database. Given the schema and a customer's question, output ONE read-only SELECT query to answer it.\n\nRules:\n- Output ONLY the SQL, or the exact word NO_QUERY only if the question is a greeting or clearly about nothing in the database.\n- Use only the tables/columns in SCHEMA.\n- 'how much / price / cost / charge' → SELECT name, default_amount (or the amount/price/cost column) FROM the relevant table WHERE name LIKE '%keyword%'.\n- 'how many / number of' → SELECT COUNT(*) ...\n- 'recent / latest / last' → SELECT ... ORDER BY created_at DESC LIMIT 5.\n- 'where / located / address' → SELECT address ... FROM branches.\n- Use LIKE '%word%' for name matching. No markdown, no explanations."],
+                ['role' => 'system', 'content' => "You are a read-only SQL query generator. Given SCHEMA (table: columns) and a user's question, output ONE SELECT query that answers it.\n\nRules:\n- Output ONLY the SQL, or the exact word NO_QUERY only if the question is a greeting or clearly about nothing in the database.\n- Use only the tables and columns listed in SCHEMA; never invent a table or column.\n- Match names with LIKE '%word%'.\n- 'how many / number of' → SELECT COUNT(*) ...\n- 'recent / latest / last' → SELECT ... ORDER BY the table's date/time column DESC LIMIT 5.\n- No markdown, no explanations."],
                 ['role' => 'user', 'content' => "SCHEMA (table: columns):\n" . $schemaCtx . "\n\nQUESTION:\n" . $question],
             ], LlmFactory::defaultModel(), 0.0);
             $sql = trim((string)($res['content'] ?? ''));
