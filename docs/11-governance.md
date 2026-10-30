@@ -263,6 +263,7 @@ See [03 — Configuration](03-configuration.md#settings-in-the-database) for the
 | `rate_limit.per_day` | `limits_json` | `0` | generic daily quota |
 | `limits.session_turns` | `limits_json` | `10` | turns replayed in a conversation |
 | `limits.memory_turns` | `limits_json` | `10` | turns replayed into a prompt |
+| `limits.store_rows` | `limits_json` | `50` | answer rows kept for transcript re-render; `0` = none |
 | `limits.summarize_after` | `limits_json` | `24` | summarise older turns; `0` = never |
 
 `masked_columns` lives in `schema_policy.masked_columns`; see

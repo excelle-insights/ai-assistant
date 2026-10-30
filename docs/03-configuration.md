@@ -484,12 +484,15 @@ the spec the package builds; your front-end decides how to draw it. See
 | `limits.session_turns` | `10` | int | `AI_ASSISTANT_SESSION_TURNS` (legacy `AI_WHATSAPP_SESSION_TURNS`) |
 | `limits.session_ttl_minutes` | `60` | int | `AI_ASSISTANT_SESSION_TTL` |
 | `limits.memory_turns` | `10` | int | `AI_ASSISTANT_MEMORY_TURNS` |
+| `limits.store_rows` | `50` | int | `AI_ASSISTANT_STORE_ROWS` |
 | `limits.summarize_after` | `24` | int | `AI_ASSISTANT_SUMMARIZE_AFTER` |
 | `limits.audit_export_rows` | `10000` | int | `AI_ASSISTANT_AUDIT_EXPORT_ROWS` |
 | `rate_limit.per_hour` | `60` | int | `AI_ASSISTANT_RATE_LIMIT_PER_HOUR` (legacy `AI_RATE_LIMIT_PER_HOUR`) |
 | `rate_limit.per_day` | `0` (unlimited) | int | `AI_ASSISTANT_RATE_LIMIT_PER_DAY` |
 
 `memory_turns` is how much recent conversation is replayed into a prompt;
+`store_rows` is how many answer rows a re-opened thread re-renders — `0` stores
+none, which keeps decrypted table values out of `{prefix}_messages`;
 `summarize_after` is the point where older turns are summarised away (`0` = never);
 `retention_days` is the number `AuditService::retention()` proposes for old audit
 rows; `session_*` belong to the legacy `{prefix}_sessions` store. `rate_limit.*` are

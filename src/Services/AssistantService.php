@@ -1699,6 +1699,7 @@ final class AssistantService
     private function remember(AskRequest $request, string $conversationId, string $question, Answer $answer, float $startedAt): void
     {
         if ($this->conversations !== null && $conversationId !== '') {
+            $storeRows = max(0, Config::int('limits.store_rows', 50));
             try {
                 $this->conversations->append($conversationId, [
                     'role' => 'user',
@@ -1710,7 +1711,7 @@ final class AssistantService
                     'content' => $answer->text,
                     'intent' => $answer->intent,
                     'citations' => array_map(static fn (Citation $c): array => $c->toArray(), $answer->citations),
-                    'rows' => array_slice($answer->rows, 0, 50),
+                    'rows' => $storeRows > 0 ? array_slice($answer->rows, 0, $storeRows) : [],
                     'chart' => $answer->chart,
                     'applied_filters' => $answer->appliedFilters,
                     'sql' => $answer->sql,

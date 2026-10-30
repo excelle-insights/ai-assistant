@@ -108,6 +108,7 @@ final class Config
         'limits.session_turns' => ['AI_ASSISTANT_SESSION_TURNS'],
         'limits.session_ttl_minutes' => ['AI_ASSISTANT_SESSION_TTL'],
         'limits.memory_turns' => ['AI_ASSISTANT_MEMORY_TURNS'],
+        'limits.store_rows' => ['AI_ASSISTANT_STORE_ROWS'],
 
         'rate_limit.per_hour' => ['AI_ASSISTANT_RATE_LIMIT_PER_HOUR'],
         'rate_limit.per_day' => ['AI_ASSISTANT_RATE_LIMIT_PER_DAY'],
@@ -167,7 +168,7 @@ final class Config
         'metrics' => [],
         'knowledge' => ['retrieval' => 'hybrid', 'top_k' => 5, 'fallback_latest' => false, 'min_similarity' => 0.2, 'self_training' => true],
         'features' => ['data_qa', 'documents', 'actions', 'charts', 'exports', 'reports', 'feedback', 'audit'],
-        'limits' => ['max_rows' => 200, 'max_upload_mb' => 25, 'max_pages' => 300, 'retention_days' => 365, 'session_turns' => 10, 'session_ttl_minutes' => 60, 'memory_turns' => 10],
+        'limits' => ['max_rows' => 200, 'max_upload_mb' => 25, 'max_pages' => 300, 'retention_days' => 365, 'session_turns' => 10, 'session_ttl_minutes' => 60, 'memory_turns' => 10, 'store_rows' => 50],
         'rate_limit' => ['per_hour' => 60, 'per_day' => 0],
         'channels' => [
             'whatsapp' => ['enabled' => true, 'table_prefix' => 'whatsapp', 'auto_reply' => true, 'fallback_template_id' => 0, 'booking_hook' => true, 'session_window_hours' => 24, 'max_message_chars' => 4096, 'max_rows_in_message' => 15, 'show_sources' => true],
