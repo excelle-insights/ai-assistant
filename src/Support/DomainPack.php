@@ -62,7 +62,7 @@ final class DomainPack
     {
         $this->packs = array_values(array_filter($packs, 'is_array'));
         $this->catalog = $catalog;
-        $this->maxDimensions = max(1, (int) ($options['max_dimensions'] ?? 14));
+        $this->maxDimensions = max(1, (int) ($options['max_dimensions'] ?? Config::int('semantic.max_dimensions', 14)));
         $this->maxMetrics = max(1, (int) ($options['max_metrics'] ?? 12));
         $autoDerive = (bool) ($options['auto_derive'] ?? Config::bool('semantic.auto_derive', true));
 
@@ -70,7 +70,7 @@ final class DomainPack
             $this->ingestPack($pack);
         }
         if ($autoDerive) {
-            $this->deriveFromCatalog((int) ($options['max_datasets'] ?? 80));
+            $this->deriveFromCatalog((int) ($options['max_datasets'] ?? Config::int('semantic.max_datasets', 80)));
         }
     }
 
@@ -251,46 +251,31 @@ final class DomainPack
      * free-form column dumps. Kept short on purpose — a plan that invents a
      * metric is rejected by QueryCompiler, so precision here beats coverage.
      */
-    public function vocabulary(int $maxChars = 5000, int $maxDatasets = 40): string
+    public function vocabulary(int $maxChars = 12000, int $maxDatasets = 80): string
     {
+        $budget = max(120, $maxChars);
+        $datasets = $this->listDatasets();
+        $detailed = array_slice($datasets, 0, max(0, $maxDatasets));
+        $rest = array_slice($datasets, count($detailed));
+
+        // With many datasets, hold back space for the name-only index so no
+        // table disappears from the prompt just because the first ones are wordy.
+        $reserve = count($datasets) > 12 ? min(7000, max(600, (int) ($budget * 0.4))) : 0;
+        $detailBudget = max(120, $budget - $reserve);
+
         $lines = [];
         $used = 0;
-        foreach (array_slice($this->listDatasets(), 0, $maxDatasets) as $dataset) {
-            $metrics = [];
-            foreach ((array) $dataset['metrics'] as $metric) {
-                $metrics[] = (string) $metric['name'];
-            }
-            $dimensions = [];
-            foreach ((array) $dataset['dimensions'] as $dimension) {
-                $dimensions[] = (string) $dimension['name'];
-            }
-            $line = $dataset['name'];
-            $label = (string) ($dataset['label'] ?? '');
-            if ($label !== '' && strcasecmp($label, (string) $dataset['name']) !== 0) {
-                $line .= ' (' . $label . ')';
-            }
-            $line .= ': metrics[' . implode(', ', $metrics) . ']';
-            if ($dimensions !== []) {
-                $line .= ' dimensions[' . implode(', ', $dimensions) . ']';
-            }
-            if ((string) $dataset['date_field'] !== '') {
-                $line .= ' date[' . (string) $dataset['date_field'] . ']';
-            }
-            $aliases = array_values(array_filter(array_map('strval', (array) ($dataset['aliases'] ?? []))));
-            if ($aliases !== []) {
-                $line .= ' also[' . implode(', ', $aliases) . ']';
-            }
-            $description = trim((string) ($dataset['description'] ?? ''));
-            if ($description !== '') {
-                $line .= ' — ' . $description;
-            }
-            $used += strlen($line) + 1;
-            if ($used > $maxChars) {
-                $lines[] = '… (more datasets available; ask for a narrower report)';
-                break;
+        foreach ($detailed as $dataset) {
+            $line = $this->vocabularyLine($dataset);
+            if ($used + strlen($line) + 1 > $detailBudget) {
+                $rest[] = $dataset;
+                continue;
             }
             $lines[] = $line;
+            $used += strlen($line) + 1;
         }
+        $compactBudget = $reserve > 0 ? $reserve : $budget - $used;
+        $lines = array_merge($lines, $this->compactVocabularyLines($rest, $compactBudget));
 
         $out = [];
         if ($lines !== []) {
@@ -298,11 +283,19 @@ final class DomainPack
             $out = array_merge($out, $lines);
         }
         if ($this->entities !== []) {
+            // Curated records only: one line per auto-derived table would dwarf
+            // the dataset list without helping a lookup question.
+            $curated = array_values(array_filter(
+                $this->entities,
+                static fn (array $entity): bool => (string) ($entity['source'] ?? '') === 'pack'
+            ));
+            $entities = $curated !== [] ? $curated : array_slice(array_values($this->entities), 0, 12);
             $names = [];
-            foreach ($this->entities as $entity) {
+            foreach ($entities as $entity) {
                 $names[] = $entity['name'] . '[' . implode(', ', array_slice((array) $entity['fields'], 0, 8)) . ']';
             }
-            $out[] = 'Records you can look up: ' . implode('; ', $names);
+            $line = 'Records you can look up: ' . implode('; ', $names);
+            $out[] = strlen($line) > 1600 ? rtrim(substr($line, 0, 1599)) . '…' : $line;
         }
         if ($this->actions !== []) {
             $names = [];
@@ -312,6 +305,94 @@ final class DomainPack
             $out[] = 'Actions (always confirmed by the user first): ' . implode('; ', $names);
         }
         return implode("\n", $out);
+    }
+
+    /** @param array<string,mixed> $dataset */
+    private function vocabularyLine(array $dataset): string
+    {
+        $metrics = [];
+        foreach ((array) $dataset['metrics'] as $metric) {
+            $metrics[] = (string) $metric['name'];
+        }
+        $dimensions = [];
+        foreach ((array) $dataset['dimensions'] as $dimension) {
+            $dimensions[] = (string) $dimension['name'];
+        }
+        $line = $dataset['name'];
+        $label = (string) ($dataset['label'] ?? '');
+        if ($label !== '' && strcasecmp($label, (string) $dataset['name']) !== 0) {
+            $line .= ' (' . $label . ')';
+        }
+        $line .= ': metrics[' . implode(', ', $metrics) . ']';
+        if ($dimensions !== []) {
+            $line .= ' dimensions[' . implode(', ', $dimensions) . ']';
+        }
+        if ((string) $dataset['date_field'] !== '') {
+            $line .= ' date[' . (string) $dataset['date_field'] . ']';
+        }
+        $aliases = self::displayAliases($dataset);
+        if ($aliases !== []) {
+            $line .= ' also[' . implode(', ', $aliases) . ']';
+        }
+        $description = trim(preg_replace('/\s+/', ' ', (string) ($dataset['description'] ?? '')) ?? '');
+        if ($description !== '') {
+            // One paragraph is enough to route; the full text lives in the UI.
+            if (strlen($description) > 220) {
+                $description = rtrim(substr($description, 0, 219)) . '…';
+            }
+            $line .= ' — ' . $description;
+        }
+        return $line;
+    }
+
+    /**
+     * Datasets that did not fit the detailed budget, kept as name(aliases) so a
+     * question about them still reaches the right dataset.
+     *
+     * @param array<int,array<string,mixed>> $datasets
+     * @return array<int,string>
+     */
+    private function compactVocabularyLines(array $datasets, int $budget): array
+    {
+        $entries = [];
+        foreach ($datasets as $dataset) {
+            $entry = (string) $dataset['name'];
+            $aliases = self::displayAliases($dataset);
+            if ($aliases !== []) {
+                $entry .= '(' . implode(', ', array_slice($aliases, 0, 6)) . ')';
+            }
+            $entries[] = $entry;
+        }
+        if ($entries === []) {
+            return [];
+        }
+        $joined = 'Also available: ' . implode(', ', $entries);
+        if ($budget <= 0) {
+            return [];
+        }
+        if (strlen($joined) > $budget) {
+            $joined = rtrim(substr($joined, 0, max(0, $budget - 1))) . '…';
+        }
+        $lines = [];
+        while ($joined !== '') {
+            if (strlen($joined) <= 180) {
+                $lines[] = $joined;
+                break;
+            }
+            $cut = strrpos(substr($joined, 0, 180), ' ');
+            if ($cut === false || $cut < 60) {
+                $cut = 180;
+            }
+            $lines[] = rtrim(substr($joined, 0, $cut), " ,") . ',';
+            $joined = ltrim(substr($joined, $cut), " ,");
+        }
+        return $lines;
+    }
+
+    /** @param array<string,mixed> $dataset @return array<int,string> */
+    private static function displayAliases(array $dataset): array
+    {
+        return array_slice(array_values(array_filter(array_map('strval', (array) ($dataset['aliases'] ?? [])))), 0, 12);
     }
 
     /** @return array<string,mixed> JSON-safe description for the admin UI */

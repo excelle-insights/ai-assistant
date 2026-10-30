@@ -342,7 +342,7 @@ final class AssistantService
         $lines[] = 'Current date: ' . $this->today();
 
         $vocabulary = $this->hasDataPath() && $this->pack !== null
-            ? $this->pack->vocabulary(Config::int('semantic.vocab_chars', 5000))
+            ? $this->pack->vocabulary(Config::int('semantic.vocab_chars', 12000))
             : '';
         if ($vocabulary !== '') {
             $lines[] = 'Vocabulary:';
@@ -1484,7 +1484,8 @@ final class AssistantService
             . "\nThe table below is the complete answer and is already shown to the user: summarise it in one or two sentences"
             . ($period !== '' ? ', naming the period (' . $period . ')' : '')
             . '. Use the column labels. Write money exactly as the values and labels give it: never add a currency'
-            . ' symbol or a unit the table does not contain. Never say the information is missing,'
+            . ' symbol or a unit the table does not contain; long numbers may take thousands separators, but keep every digit.'
+            . ' Never say the information is missing,'
             . ' incomplete or unavailable, and never apologise, when the table has rows.',
             $request->question,
             []

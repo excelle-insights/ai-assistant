@@ -170,7 +170,7 @@ return [
         'allow_raw_sql' => $bool($env(['AI_ASSISTANT_ALLOW_RAW_SQL']), false),
         'raw_sql_roles' => $csv($env(['AI_ASSISTANT_RAW_SQL_ROLES'], 'admin,owner')),
         // Budget for the vocabulary block appended to the routing prompt.
-        'vocab_chars' => (int) $env(['AI_ASSISTANT_VOCAB_CHARS'], 5000),
+        'vocab_chars' => (int) $env(['AI_ASSISTANT_VOCAB_CHARS'], 12000),
     ],
 
     // ── Charts (visualisation of any result set) ─────────────────────────────

@@ -265,7 +265,9 @@ When a question needs data, the package builds a "schema card" from the catalog 
 puts it in the routing prompt: table and column labels, descriptions, types,
 `sensitivity`, `is_measure`, `format` and `aliases` — bounded by
 `schema.context_max_chars` (14000) and `schema.context_max_tables` (60), with the
-semantic vocabulary taking `semantic.vocab_chars` (5000).
+semantic vocabulary taking `semantic.vocab_chars` (12000). Sentences are trimmed to
+one short line per dataset, and any dataset that does not fit is still listed by
+name and aliases under “Also available”, so a long description never hides a table.
 
 Two consequences for how you write descriptions:
 
