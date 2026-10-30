@@ -215,7 +215,7 @@ class SchemaService
      * Mirror the live (or attached-source) structure into {prefix}_schema,
      * preserving descriptions a human or a dump already supplied.
      *
-     * @param array{tables?:string[],prune?:bool} $opts
+     * @param array{tables?:string[],prune?:bool,sample_rows?:int} $opts
      * @return array{added:int,updated:int,unchanged:int,total:int,pruned:int,tables:int}
      */
     public function syncSchema(array $opts = []): array
@@ -223,6 +223,7 @@ class SchemaService
         $table = $this->ensureSchemaTable();
         $wanted = array_map(static fn ($t): string => strtolower(trim((string) $t)), (array) ($opts['tables'] ?? []));
         $prune = (bool) ($opts['prune'] ?? Config::bool('schema.prune_stale', false));
+        $sampleRows = max(0, (int) ($opts['sample_rows'] ?? Config::int('schema.sample_rows', 25)));
 
         $existing = $this->catalogIndex();
         $stats = ['added' => 0, 'updated' => 0, 'unchanged' => 0, 'total' => 0, 'pruned' => 0, 'tables' => 0];
@@ -256,7 +257,9 @@ class SchemaService
                 $foreign[$fk['column']] = $fk['table'];
             }
 
-            foreach ($this->columns($name) as $c) {
+            $liveColumns = $this->columns($name);
+            $samples = $sampleRows > 0 ? $this->sampleValues($name, $liveColumns, $sampleRows) : [];
+            foreach ($liveColumns as $c) {
                 $column = (string) $c['name'];
                 if (!$this->policy->isColumnAllowed($name, $column)) {
                     continue;
@@ -265,7 +268,17 @@ class SchemaService
                 $seen[$name . '.' . $column] = true;
                 $dbComment = trim((string) ($c['comment'] ?? ''));
                 $auto = SchemaHints::autoDescription($name, $column, $foreign[$column] ?? null);
+                $values = $samples[$column] ?? [];
+                $hint = $values === [] ? '' : SchemaHints::valueHint($column, $values);
                 $dataType = (string) ($c['data_type'] ?? '');
+                $format = SchemaHints::format($column, $dataType);
+                if ($hint !== '' && SchemaHints::dateFormatHint($values) !== '' && $format === 'text') {
+                    $format = str_contains(SchemaHints::dateFormatHint($values), 'HH') ? 'datetime' : 'date';
+                }
+                // Value hints are observations of the data, not guesses, so they
+                // survive auto_describe = false — a new table with no comments
+                // still tells the model its dates and enum values.
+                $guess = Config::bool('schema.auto_describe', true) ? $auto : '';
                 $this->writeCatalogRow(
                     $table,
                     $existing,
@@ -273,13 +286,13 @@ class SchemaService
                     $name,
                     $column,
                     (string) ($c['type'] ?? ''),
-                    $dbComment !== '' ? $dbComment : (Config::bool('schema.auto_describe', true) ? $auto : ''),
+                    $dbComment !== '' ? $dbComment : trim($guess . $hint),
                     [
                         'label' => SchemaHints::label($column),
                         'table_label' => SchemaHints::label($name),
-                        'sensitivity' => SchemaHints::sensitivity($column, $dataType, $this->policy),
+                        'sensitivity' => SchemaHints::looksEncrypted($values) ? 'secret' : SchemaHints::sensitivity($column, $dataType, $this->policy),
                         'is_measure' => SchemaHints::isMeasure($column, $dataType) ? 1 : 0,
-                        'format' => SchemaHints::format($column, $dataType),
+                        'format' => $format,
                     ],
                     $dbComment !== '' ? 'comment' : 'auto'
                 );
@@ -1437,6 +1450,66 @@ class SchemaService
         return $this->pdo !== null || $this->source !== null;
     }
 
+    /**
+     * A handful of values per short text column, so a description can state the
+     * format or encoding the application actually writes — dates stored as
+     * "31-03-2025", encrypted names, state enums. One query per table.
+     *
+     * @param array<int,array<string,mixed>> $columns information_schema rows
+     * @return array<string,string[]>
+     */
+    private function sampleValues(string $table, array $columns, int $limit): array
+    {
+        $wanted = [];
+        foreach ($columns as $c) {
+            $type = strtolower((string) ($c['data_type'] ?? ''));
+            if (in_array($type, ['char', 'varchar'], true)) {
+                $wanted[] = (string) ($c['name'] ?? '');
+            }
+        }
+        $wanted = array_values(array_filter($wanted));
+        if ($wanted === []) {
+            return [];
+        }
+        try {
+            $sql = 'SELECT ' . implode(', ', array_map(static fn (string $c): string => '`' . Db::identifier($c) . '`', $wanted))
+                . ' FROM `' . Db::identifier($table) . '` LIMIT ' . max(1, min(200, $limit));
+            $rows = $this->connection()->query($sql)->fetchAll(PDO::FETCH_ASSOC);
+        } catch (\Throwable) {
+            return [];
+        }
+        $out = [];
+        foreach ($rows as $row) {
+            foreach ($wanted as $column) {
+                $value = $row[$column] ?? null;
+                if (is_scalar($value) && (string) $value !== '') {
+                    $out[$column][] = (string) $value;
+                }
+            }
+        }
+        // A skewed table (99% NOTPAID) hides the other states from a row sample;
+        // ask the database for the distinct values of enum-like columns instead.
+        foreach ($wanted as $column) {
+            $distinct = array_unique($out[$column] ?? []);
+            if (count($distinct) >= 2 || !SchemaHints::isEnumColumn($column)) {
+                continue;
+            }
+            try {
+                $sql = 'SELECT DISTINCT `' . Db::identifier($column) . '` AS v FROM `' . Db::identifier($table) . '`'
+                    . " WHERE `" . Db::identifier($column) . "` IS NOT NULL AND `" . Db::identifier($column) . "` <> '' LIMIT 12";
+                $values = $this->connection()->query($sql)->fetchAll(PDO::FETCH_COLUMN);
+            } catch (\Throwable) {
+                continue;
+            }
+            foreach ($values as $value) {
+                if (is_scalar($value) && (string) $value !== '') {
+                    $out[$column][] = (string) $value;
+                }
+            }
+        }
+        return $out;
+    }
+
     private function connection(): PDO
     {
         if ($this->source !== null) {
@@ -1528,9 +1601,22 @@ class SchemaService
         ];
         $columns = $this->catalogColumns($table);
         foreach (['label', 'table_label', 'sensitivity', 'is_measure', 'format', 'aliases'] as $field) {
-            if (array_key_exists($field, $meta) && in_array($field, $columns, true)) {
-                $insert[$field] = $meta[$field];
+            if (!array_key_exists($field, $meta) || !in_array($field, $columns, true)) {
+                continue;
             }
+            $value = $meta[$field];
+            // A curated row keeps its labels, formats and measure flags too: a
+            // sync that rewrote "Address" back to "Li address" every night is
+            // not a sync, it is a regression. A detected secret still wins.
+            if ($keepOldText && $old !== null) {
+                $before = $old[$field] ?? null;
+                $beforeText = is_scalar($before) ? trim((string) $before) : '';
+                $escalatesSecret = $field === 'sensitivity' && (string) $value === 'secret' && $beforeText !== 'secret';
+                if ($beforeText !== '' && !$escalatesSecret) {
+                    $value = $before;
+                }
+            }
+            $insert[$field] = $value;
         }
         $insert = array_intersect_key($insert, array_flip($columns));
         if (!array_key_exists('data_type', $insert) || $insert['data_type'] === '') {

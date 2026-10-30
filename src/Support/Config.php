@@ -75,6 +75,7 @@ final class Config
 
         'schema.prune_stale' => ['AI_ASSISTANT_SCHEMA_PRUNE'],
         'schema.auto_describe' => ['AI_ASSISTANT_SCHEMA_AUTO_DESCRIBE'],
+        'schema.sample_rows' => ['AI_ASSISTANT_SCHEMA_SAMPLE_ROWS'],
         'schema.skip_tables' => ['AI_ASSISTANT_SCHEMA_SKIP_TABLES'],
 
         'semantic.enabled' => ['AI_ASSISTANT_SEMANTIC_ENABLED'],
@@ -158,7 +159,7 @@ final class Config
             'max_rows' => 200, 'default_limit' => 20,
             'include_own_tables' => false, 'require_tenant_scope' => true,
         ],
-        'schema' => ['prune_stale' => false, 'auto_describe' => true],
+        'schema' => ['prune_stale' => false, 'auto_describe' => true, 'sample_rows' => 25],
         'semantic' => [
             'enabled' => true, 'auto_derive' => true, 'packs' => [], 'pack_file' => '',
             'max_dimensions' => 14, 'max_datasets' => 80, 'allow_raw_sql' => false,

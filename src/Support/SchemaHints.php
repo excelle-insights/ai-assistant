@@ -281,6 +281,106 @@ final class SchemaHints
         return self::MONEY_WORDS;
     }
 
+    /**
+     * The date shape of sampled text values, in the words a human reads:
+     * 'dd-mm-yyyy', 'dd-mm-yyyy HH:MM', 'yyyy-mm-dd', … Empty when the samples
+     * are not consistent dates.
+     *
+     * @param array<int,string> $values
+     */
+    public static function dateFormatHint(array $values): string
+    {
+        $values = array_values(array_filter(array_map(static fn ($v): string => trim((string) $v), $values), static fn (string $v): bool => $v !== ''));
+        if (count($values) < 3) {
+            return '';
+        }
+        $patterns = [
+            'dd-mm-yyyy' => '/^(\d{2})-(\d{2})-(\d{4})$/',
+            'dd-mm-yyyy HH:MM' => '/^(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2})$/',
+            'dd-mm-yyyy HH:MM:SS' => '/^(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2}):(\d{2})$/',
+            'yyyy-mm-dd' => '/^(\d{4})-(\d{2})-(\d{2})$/',
+            'yyyy-mm-dd HH:MM:SS' => '/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/',
+        ];
+        foreach ($patterns as $label => $pattern) {
+            foreach ($values as $value) {
+                if (preg_match($pattern, $value, $m) !== 1) {
+                    continue 2;
+                }
+                $day = str_starts_with($label, 'd') ? (int) $m[1] : (int) $m[3];
+                $month = (int) $m[2];
+                $year = str_starts_with($label, 'd') ? (int) $m[3] : (int) $m[1];
+                if (!checkdate($month, $day, $year)) {
+                    continue 2;
+                }
+            }
+            return $label;
+        }
+        return '';
+    }
+
+    /**
+     * True when the samples look like base64 of AES blocks — what this kind of
+     * application stores when a column is encrypted at rest.
+     *
+     * @param array<int,string> $values
+     */
+    public static function looksEncrypted(array $values): bool
+    {
+        $values = array_values(array_filter(array_map(static fn ($v): string => trim((string) $v), $values), static fn (string $v): bool => $v !== ''));
+        if (count($values) < 3) {
+            return false;
+        }
+        foreach ($values as $value) {
+            if (strlen($value) < 16 || strlen($value) % 4 !== 0 || preg_match('/^[A-Za-z0-9+\/=]+$/', $value) !== 1) {
+                return false;
+            }
+            $raw = base64_decode($value, true);
+            if ($raw === false || $raw === '' || strlen($raw) % 16 !== 0 || preg_match('/^[0-9a-f]+$/i', $value) === 1) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * One sentence appended to an automatic description, learned from the
+     * values the column actually holds. Empty when nothing is certain.
+     *
+     * @param array<int,string> $values
+     */
+    public static function valueHint(string $column, array $values): string
+    {
+        $hints = [];
+        $format = self::dateFormatHint($values);
+        if ($format !== '') {
+            $hints[] = 'Stored as text dates (format ' . $format . ').';
+        } elseif (self::looksEncrypted($values)) {
+            $hints[] = 'Values are encrypted; read them through a decrypting dataset expression.';
+        } else {
+            $values = array_values(array_unique(array_filter(array_map('trim', array_map('strval', $values)), static fn (string $v): bool => $v !== '')));
+            if (self::isEnumColumn($column) && count($values) >= 2 && count($values) <= 8) {
+                $short = true;
+                foreach ($values as $value) {
+                    if (strlen($value) > 30 || preg_match('/^[A-Za-z0-9 _\-\/]+$/', $value) !== 1) {
+                        $short = false;
+                        break;
+                    }
+                }
+                if ($short) {
+                    $hints[] = 'Values seen: ' . implode(', ', $values) . '.';
+                }
+            }
+        }
+
+        return $hints === [] ? '' : ' ' . implode(' ', $hints);
+    }
+
+    /** Columns that behave like enums: a handful of short, repeated values. */
+    public static function isEnumColumn(string $column): bool
+    {
+        return preg_match('/(^|_)(state|status|type|mode|category|stage|kind|role|currency|source|verified)$/', strtolower(trim($column))) === 1;
+    }
+
     /** Word-boundary match: "total_price" is money, "summary" is not. */
     private static function isMoneyColumn(string $column): bool
     {

@@ -123,6 +123,23 @@ same('hints: format bool', 'bool', SchemaHints::format('is_active', 'tinyint'));
 same('hints: format date', 'date', SchemaHints::format('due', 'date'));
 same('hints: measure', true, SchemaHints::isMeasure('amount', 'decimal'));
 same('hints: id is not a measure', false, SchemaHints::isMeasure('customer_id', 'int'));
+same('hints: pay_state is an enum column', true, SchemaHints::isEnumColumn('pay_state'));
+same('hints: verified is an enum column', true, SchemaHints::isEnumColumn('verified'));
+same('hints: post_date is not an enum column', false, SchemaHints::isEnumColumn('post_date'));
+
+// ─── Value hints: what the column really holds ───────────────────────────────
+same('values: dd-mm-yyyy', 'dd-mm-yyyy', SchemaHints::dateFormatHint(['01-04-2025', '02-04-2025', '31-12-2025']));
+same('values: dd-mm-yyyy with time', 'dd-mm-yyyy HH:MM', SchemaHints::dateFormatHint(['01-04-2025 08:44', '02-04-2025 09:30', '31-12-2025 23:59']));
+same('values: iso dates', 'yyyy-mm-dd', SchemaHints::dateFormatHint(['2025-04-01', '2025-04-02', '2025-12-31']));
+same('values: too few samples', '', SchemaHints::dateFormatHint(['01-04-2025']));
+same('values: not dates', '', SchemaHints::dateFormatHint(['Nairobi', 'Kiambu', 'Nakuru']));
+check('values: base64 of AES blocks is encrypted', SchemaHints::looksEncrypted(['XgApd7XbZYu+fKRZPPxKGg==', 'ctn1B/e79VLgmISegwWGAA==', '9n3VukHERNnhcldaOPUwNQ==']));
+check('values: counties are not encrypted', !SchemaHints::looksEncrypted(['Nairobi', 'Kiambu', 'Nakuru']));
+check('values: dates are not encrypted', !SchemaHints::looksEncrypted(['01-04-2025', '02-04-2025', '31-12-2025']));
+check('values: a state column lists its values', str_contains(SchemaHints::valueHint('pay_state', ['NOTPAID', 'COMPLETED', 'NOTPAID']), 'Values seen: NOTPAID, COMPLETED'));
+same('values: free text gets no hint', '', SchemaHints::valueHint('narration', ['Test', 'Deposit', 'Booking fee']));
+check('values: encrypted names are flagged', str_contains(SchemaHints::valueHint('client_name', ['XgApd7XbZYu+fKRZPPxKGg==', 'ctn1B/e79VLgmISegwWGAA==', '9n3VukHERNnhcldaOPUwNQ==']), 'encrypted'));
+check('values: text dates state their format', str_contains(SchemaHints::valueHint('paid_date', ['01-04-2025', '02-04-2025', '03-04-2025']), 'dd-mm-yyyy'));
 check('hints: qty is a measure', SchemaHints::isMeasure('qty', 'int'), 'qty should be a measure');
 
 // ─── CsvReader ────────────────────────────────────────────────────────────────

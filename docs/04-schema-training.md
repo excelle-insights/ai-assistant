@@ -68,6 +68,16 @@ query scope.
 |---------------|--------|
 | `tables` | array of table names — sync only these (case-insensitive) |
 | `prune` | delete catalog rows whose table/column no longer exists; defaults to `schema.prune_stale` (`false`) |
+| `sample_rows` | rows read per table to observe the data; defaults to `schema.sample_rows` (`25`), `0` disables sampling |
+
+A sync also reads a handful of values per text column (`schema.sample_rows`) and
+appends what it observes to the description: `Stored as text dates (format
+dd-mm-yyyy).`, `Values seen: NOTPAID, PAID.`, or `Values are encrypted; read them
+through a decrypting dataset expression.` Those facts are what let the model
+write `STR_TO_DATE(col, '%d-%m-%Y')` or know a state column's real values. They
+are added even with `schema.auto_describe` off — an observation is not a guess.
+Rows whose description came from a person keep their labels, formats and measure
+flags on later syncs, so a nightly sync never undoes your curation.
 
 ```php
 $api->handle('schema.sync', ['options' => ['tables' => ['orders', 'order_lines'], 'prune' => true]]);

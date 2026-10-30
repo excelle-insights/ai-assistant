@@ -315,6 +315,7 @@ clamped to it; `default_limit` applies when no limit is asked for.
 | Key | Default | Type | env |
 |-----|---------|------|-----|
 | `schema.auto_describe` | `true` | yes/no | `AI_ASSISTANT_SCHEMA_AUTO_DESCRIBE` |
+| `schema.sample_rows` | `25` | int | `AI_ASSISTANT_SCHEMA_SAMPLE_ROWS` |
 | `schema.prune_stale` | `false` | yes/no | `AI_ASSISTANT_SCHEMA_PRUNE` |
 | `schema.context_max_chars` | `14000` | int | `AI_ASSISTANT_SCHEMA_CONTEXT_CHARS` |
 | `schema.context_max_tables` | `60` | int | `AI_ASSISTANT_SCHEMA_CONTEXT_TABLES` |
@@ -322,7 +323,11 @@ clamped to it; `default_limit` applies when no limit is asked for.
 `auto_describe` fills a blank description with a generated guess so the assistant
 is never mute about an unfamiliar column; descriptions *you* wrote are never
 overwritten, which is why filling them in matters — see
-[04 — Schema & training](04-schema-training.md). `prune_stale=true` deletes
+[04 — Schema & training](04-schema-training.md). `sample_rows` is how many rows a
+sync reads per table to *observe* the data: stored date formats (`dd-mm-yyyy`),
+encrypted values and a state column's actual values are appended to the
+description as facts, even with `auto_describe` off. Curated rows keep their
+labels, formats and measure flags on later syncs. `prune_stale=true` deletes
 catalog rows for columns that no longer exist after a schema sync. The last two
 are the budget of the "schema card" sent to the model when it writes SQL.
 

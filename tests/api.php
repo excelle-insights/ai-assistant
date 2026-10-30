@@ -1013,7 +1013,7 @@ $degraded = $brokenLlm->chat('how many orders', apiUser());
 okAnswer('broken model: still answers', $degraded);
 same('broken model: read the question itself', 'guessed', $degraded['answer']['meta']['routed_by'] ?? null);
 same('broken model: still answers from real rows', true, $degraded['answer']['grounded'] ?? null);
-check('broken model: says where the number came from', str_contains((string) $degraded['answer']['text'], 'orders'), (string) $degraded['answer']['text']);
+check('broken model: says where the number came from', stripos((string) $degraded['answer']['text'], 'orders') !== false, (string) $degraded['answer']['text']);
 
 $noRows = new AssistantApi(null, ['llm' => new ApiLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records']]])], apiOptions($dir));
 $noConn = $noRows->runRawSql('SELECT id FROM orders', apiUser(['roles' => ['admin']]));

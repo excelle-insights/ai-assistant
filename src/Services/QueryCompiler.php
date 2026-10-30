@@ -34,7 +34,8 @@ final class QueryCompiler
 
     /** Functions a pack expression may use — everything else is refused. */
     private const ALLOWED_FUNCTIONS = [
-        'ABS', 'AES_DECRYPT', 'AVG', 'CEIL', 'CEILING', 'COALESCE', 'CONCAT', 'CONCAT_WS', 'COUNT', 'DATE', 'DATE_FORMAT',
+        'ABS', 'AES_DECRYPT', 'AVG', 'CEIL', 'CEILING', 'COALESCE', 'CONCAT', 'CONCAT_WS', 'COUNT', 'CURDATE', 'CURRENT_DATE',
+        'DATE', 'DATE_FORMAT',
         'DAY', 'DAYOFWEEK', 'DISTINCT', 'EXTRACT', 'FLOOR', 'FROM_BASE64', 'GREATEST', 'IF', 'IFNULL', 'LEAST', 'LEFT',
         'LENGTH', 'LOWER', 'MAX', 'MIN', 'MONTH', 'NOW', 'NULLIF', 'QUARTER', 'REPLACE', 'RIGHT', 'ROUND',
         'STR_TO_DATE', 'SUBSTRING', 'SUM', 'TIMESTAMPDIFF', 'TRIM', 'UPPER', 'WEEK', 'YEAR',
@@ -497,13 +498,30 @@ final class QueryCompiler
         // Session variables ("@host_key") are host-owned settings, not columns.
         $withoutCalls = (string) preg_replace('/@[a-zA-Z_][a-zA-Z0-9_]*/', ' ', $withoutCalls);
         $known = $this->knownColumns($table, $joins);
-        if (preg_match_all('/[a-zA-Z_][a-zA-Z0-9_]*/', $withoutCalls, $words) > 0) {
+        $tableKeys = array_merge(array_column($known, 'table'), [DomainPack::key($table)]);
+        foreach ($joins as $join) {
+            $tableKeys[] = DomainPack::key((string) ($join['alias'] ?? ''));
+        }
+        $tableKeys = array_values(array_unique(array_filter($tableKeys)));
+
+        // A qualified column ("users.user_fname") is written by the pack author,
+        // who may read a column the catalog hides (blocked or masked PII). The
+        // qualifier must be real; the column is the host's responsibility.
+        if (preg_match_all('/`?([a-zA-Z_][a-zA-Z0-9_]*)`?\s*\.\s*`?[a-zA-Z_][a-zA-Z0-9_]*`?/', $withoutCalls, $matches) > 0) {
+            foreach ($matches[1] as $qualifier) {
+                if ($known !== [] && !in_array(DomainPack::key((string) $qualifier), $tableKeys, true)) {
+                    throw new \InvalidArgumentException('The pack expression "' . $expression . '" references unknown table "' . $qualifier . '".');
+                }
+            }
+        }
+        $unqualified = (string) preg_replace('/`?[a-zA-Z_][a-zA-Z0-9_]*`?\s*\.\s*`?[a-zA-Z_][a-zA-Z0-9_]*`?/', ' ', $withoutCalls);
+        if (preg_match_all('/[a-zA-Z_][a-zA-Z0-9_]*/', $unqualified, $words) > 0) {
             foreach ($words[0] as $word) {
                 $lower = strtolower((string) $word);
                 if (in_array($lower, self::ALLOWED_WORDS, true)) {
                     continue;
                 }
-                $isTable = in_array(DomainPack::key($lower), array_merge(array_column($known, 'table'), [DomainPack::key($table)]), true);
+                $isTable = in_array(DomainPack::key($lower), $tableKeys, true);
                 $isColumn = in_array($lower, array_column($known, 'column'), true);
                 // With no schema attached nothing is verifiable; the pack itself
                 // is the authority and the identifier test is skipped.
