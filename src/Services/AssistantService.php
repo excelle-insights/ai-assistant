@@ -1483,7 +1483,8 @@ final class AssistantService
             $this->groundedPrompt('the query result', $result->asPromptText(), $request)
             . "\nThe table below is the complete answer and is already shown to the user: summarise it in one or two sentences"
             . ($period !== '' ? ', naming the period (' . $period . ')' : '')
-            . '. Use the column labels, and money with the unit their label implies. Never say the information is missing,'
+            . '. Use the column labels. Write money exactly as the values and labels give it: never add a currency'
+            . ' symbol or a unit the table does not contain. Never say the information is missing,'
             . ' incomplete or unavailable, and never apologise, when the table has rows.',
             $request->question,
             []
@@ -1704,9 +1705,11 @@ final class AssistantService
         $scope = self::filterSentence($appliedFilters);
         $hasZeroRow = $result !== null && !$result->isEmpty() && self::hasAnyNumber((array) $result->rows[0]);
         $hint = '';
+        $hasPeriod = trim((string) ($appliedFilters['period'] ?? '')) !== '';
         if (!empty($latest['empty'])) {
             $hint = ' Nothing has been recorded in ' . strtolower((string) $latest['dataset']) . ' yet.';
-        } elseif ($latest !== []) {
+        } elseif ($hasPeriod && $latest !== []) {
+            // "The data ends in March" only helps when a period was asked for.
             $hint = ' The most recent ' . strtolower((string) $latest['dataset'])
                 . ' in AMS are from ' . $latest['month']
                 . ' (' . $latest['metric'] . ': ' . $latest['value'] . ')'
