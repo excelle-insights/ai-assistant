@@ -324,7 +324,7 @@ final class AssistantService
                 '- Use only names that appear in the vocabulary. Never invent a column, table or SQL.',
                 '- Anything countable is intent "data": a number must come from a query, never from memory.',
                 '- A dataset name on its own is still "data" — "all listings", "show projects", "users", "tasks" must return rows, not help text.',
-                '- "All users", "all leads" and "list clients" ask for records: use the name dimension and no measure, so each record is identified. Group by categories only when the question says "by ..." or asks how many.',
+                '- "All users", "all leads" and "list clients" ask for records: use the identity dimension (name, or title/unit when the dataset has one) and no measure, so each record is identified. Group by categories only when the question says "by ..." or asks how many.',
                 '- A word in also[...] or a dataset label is the same dataset (for example "projects" or "properties" for listings). Resolve it to the dataset name.',
                 '- date[field] in the vocabulary marks the dataset\'s own date column. Use it only through date_range; never put that field in dimensions, filters, metrics or order_by.',
                 '- Time words ("this month", "last year", "today") always become date_range, never a filter on a date column.',
@@ -777,18 +777,25 @@ final class AssistantService
             return $plan;
         }
         $names = $this->pack->dimensionNames((string) $plan['dataset']);
+        $identity = '';
+        foreach (['name', 'title', 'unit', 'serial'] as $candidate) {
+            if (in_array($candidate, $names, true)) {
+                $identity = $candidate;
+                break;
+            }
+        }
         $listQuestion = preg_match('/\b(all|list|show|display)\b/i', $question) === 1
             && preg_match('/\b(how many|how much|count|total|number of|average|sum|revenue|trend|conversion|top|best|highest|lowest|worst|least|bottom)\b/i', $question) === 0
             && preg_match('/\bby\b/i', $question) === 0;
 
         // "All users" and "show clients" are record lists: a count per category
-        // hides the very thing the user asked for. Prefer the name dimension.
-        if ($listQuestion && in_array('name', $names, true)) {
+        // hides the very thing the user asked for. Prefer the identity dimension.
+        if ($listQuestion && $identity !== '') {
             $dimensions = array_values(array_filter(
                 array_map('strval', $dimensions),
-                static fn (string $dimension): bool => $dimension !== 'name'
+                static fn (string $dimension): bool => $dimension !== $identity
             ));
-            array_unshift($dimensions, 'name');
+            array_unshift($dimensions, $identity);
             $plan['dimensions'] = $dimensions;
             unset($plan['metrics']);
             if (!isset($plan['limit']) || (int) $plan['limit'] <= 0) {
@@ -806,9 +813,9 @@ final class AssistantService
         if ($dimensions !== []) {
             if (count($dimensions) < 6
                 && preg_match('/\ball\b/i', $question) === 1
-                && in_array('name', $names, true)
-                && !in_array('name', array_map('strval', $dimensions), true)) {
-                array_unshift($dimensions, 'name');
+                && $identity !== ''
+                && !in_array($identity, array_map('strval', $dimensions), true)) {
+                array_unshift($dimensions, $identity);
                 $plan['dimensions'] = $dimensions;
             }
 
