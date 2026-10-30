@@ -28,7 +28,7 @@ final class CreateAiReportsSchedulesAndExports extends AbstractMigration
         $reports = $this->table($prefix . '_report_definitions', ['id' => false, 'primary_key' => ['id']]);
         if (!$reports->exists()) {
             $reports
-                ->addColumn('id', 'string', ['limit' => 36])
+                ->addColumn('id', 'string', ['limit' => 36, 'null' => false])
                 ->addColumn('company_id', 'integer', ['signed' => false, 'default' => 0])
                 ->addColumn('owner_user_id', 'string', ['limit' => 100, 'null' => true])
                 ->addColumn('name', 'string', ['limit' => 255])
@@ -74,7 +74,7 @@ final class CreateAiReportsSchedulesAndExports extends AbstractMigration
         $exports = $this->table($prefix . '_exports', ['id' => false, 'primary_key' => ['id']]);
         if (!$exports->exists()) {
             $exports
-                ->addColumn('id', 'string', ['limit' => 36])
+                ->addColumn('id', 'string', ['limit' => 36, 'null' => false])
                 ->addColumn('company_id', 'integer', ['signed' => false, 'default' => 0])
                 ->addColumn('user_id', 'string', ['limit' => 100, 'null' => true])
                 ->addColumn('conversation_id', 'string', ['limit' => 36, 'null' => true])
