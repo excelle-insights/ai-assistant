@@ -771,11 +771,26 @@ final class AssistantService
         }
         $metrics = (array) ($plan['metrics'] ?? []);
         $dimensions = (array) ($plan['dimensions'] ?? []);
-        if ($metrics !== [] || $dimensions !== []) {
+        if ($metrics !== []) {
             return $plan;
         }
         $dataset = $this->pack->dataset($plan['dataset']);
         if ($dataset === null) {
+            return $plan;
+        }
+
+        // "All users" / "all leads" without a "by ..." grouping must identify
+        // the records, not only their categories.
+        if ($dimensions !== []) {
+            if (count($dimensions) < 6
+                && preg_match('/\ball\b/i', $question) === 1
+                && preg_match('/\bby\b/i', $question) === 0
+                && in_array('name', $this->pack->dimensionNames((string) $plan['dataset']), true)
+                && !in_array('name', array_map('strval', $dimensions), true)) {
+                array_unshift($dimensions, 'name');
+                $plan['dimensions'] = $dimensions;
+            }
+
             return $plan;
         }
 
@@ -794,7 +809,7 @@ final class AssistantService
             return $plan;
         }
 
-        $preferred = ['title', 'name', 'unit', 'serial', 'client', 'project', 'month'];
+        $preferred = ['name', 'title', 'unit', 'serial', 'client', 'project', 'month'];
         foreach ((array) ($dataset['dimensions'] ?? []) as $dimension) {
             if (in_array((string) ($dimension['name'] ?? ''), $preferred, true)) {
                 $plan['dimensions'] = [(string) $dimension['name']];

@@ -34,8 +34,8 @@ final class QueryCompiler
 
     /** Functions a pack expression may use — everything else is refused. */
     private const ALLOWED_FUNCTIONS = [
-        'ABS', 'AVG', 'CEIL', 'CEILING', 'COALESCE', 'CONCAT', 'CONCAT_WS', 'COUNT', 'DATE', 'DATE_FORMAT',
-        'DAY', 'DAYOFWEEK', 'DISTINCT', 'EXTRACT', 'FLOOR', 'GREATEST', 'IF', 'IFNULL', 'LEAST', 'LEFT',
+        'ABS', 'AES_DECRYPT', 'AVG', 'CEIL', 'CEILING', 'COALESCE', 'CONCAT', 'CONCAT_WS', 'COUNT', 'DATE', 'DATE_FORMAT',
+        'DAY', 'DAYOFWEEK', 'DISTINCT', 'EXTRACT', 'FLOOR', 'FROM_BASE64', 'GREATEST', 'IF', 'IFNULL', 'LEAST', 'LEFT',
         'LENGTH', 'LOWER', 'MAX', 'MIN', 'MONTH', 'NOW', 'NULLIF', 'QUARTER', 'REPLACE', 'RIGHT', 'ROUND',
         'STR_TO_DATE', 'SUBSTRING', 'SUM', 'TIMESTAMPDIFF', 'TRIM', 'UPPER', 'WEEK', 'YEAR',
     ];
@@ -307,12 +307,19 @@ final class QueryCompiler
                 continue;
             }
             $tableAlias = Db::identifier((string) ($join['alias'] ?? $join['table']));
-            $declared[DomainPack::key((string) $join['table'])] = [
+            $entry = [
                 'table' => Db::identifier((string) $join['table']),
                 'alias' => $tableAlias,
                 'on' => (array) ($join['on'] ?? []),
                 'type' => strtolower((string) ($join['type'] ?? 'left')) === 'inner' ? 'INNER' : 'LEFT',
             ];
+            $declared[DomainPack::key((string) $join['table'])] = $entry;
+            // Packs may alias a join ("listing.li_county" -> listing_info). A
+            // column prefix resolves by either the table name or the alias.
+            $aliasKey = DomainPack::key($tableAlias);
+            if ($aliasKey !== '' && !isset($declared[$aliasKey])) {
+                $declared[$aliasKey] = $entry;
+            }
         }
         if ($declared === []) {
             return [];
@@ -337,7 +344,13 @@ final class QueryCompiler
         }
 
         $out = [];
+        $seen = [];
         foreach ($needed as $key => $join) {
+            $aliasKey = DomainPack::key($join['alias']);
+            if (isset($seen[$aliasKey])) {
+                continue;
+            }
+            $seen[$aliasKey] = true;
             if (!$this->policy->isTableAllowed($join['table'])) {
                 throw new \InvalidArgumentException('The joined table "' . $join['table'] . '" is not readable (table policy).');
             }
@@ -481,6 +494,8 @@ final class QueryCompiler
             }
         }
         $withoutCalls = (string) preg_replace('/`?[a-zA-Z_][a-zA-Z0-9_]*`?\s*\(/', ' ', $bare);
+        // Session variables ("@host_key") are host-owned settings, not columns.
+        $withoutCalls = (string) preg_replace('/@[a-zA-Z_][a-zA-Z0-9_]*/', ' ', $withoutCalls);
         $known = $this->knownColumns($table, $joins);
         if (preg_match_all('/[a-zA-Z_][a-zA-Z0-9_]*/', $withoutCalls, $words) > 0) {
             foreach ($words[0] as $word) {

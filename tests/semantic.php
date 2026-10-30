@@ -283,6 +283,29 @@ $badExpr2 = new DomainPack([[
 ]], $catalog);
 throws('reject: keyword in an expression', fn () => (new QueryCompiler($badExpr2, new SchemaPolicy(), $tableColumns))->compile(QueryPlan::fromArray(['dataset' => 'orders', 'metrics' => ['evil']]), $scoped), 'unknown');
 
+$decryptor = new DomainPack([[
+    'name' => 'x',
+    'datasets' => [[
+        'name' => 'orders', 'table' => 'orders',
+        'dimensions' => [['name' => 'customer', 'expr' => 'AES_DECRYPT(FROM_BASE64(orders.customer_id), @host_key)']],
+    ]],
+]], $catalog);
+$decrypted = (new QueryCompiler($decryptor, new SchemaPolicy(), $tableColumns))
+    ->compile(QueryPlan::fromArray(['dataset' => 'orders', 'dimensions' => ['customer']]), $scoped);
+check('expression: decrypt helper and a session variable are allowed', str_contains($decrypted['sql'], 'AES_DECRYPT') && str_contains($decrypted['sql'], '@host_key'), $decrypted['sql']);
+
+$joinedPack = new DomainPack([[
+    'name' => 'x',
+    'datasets' => [[
+        'name' => 'orders', 'table' => 'orders', 'date_field' => 'created_at',
+        'dimensions' => [['name' => 'customer', 'column' => 'c.name']],
+        'joins' => [['table' => 'customers', 'alias' => 'c', 'on' => ['orders.customer_id' => 'c.id']]],
+    ]],
+]], $catalog, ['auto_derive' => false]);
+$joined = (new QueryCompiler($joinedPack, new SchemaPolicy(), $tableColumns))
+    ->compile(QueryPlan::fromArray(['dataset' => 'orders', 'dimensions' => ['customer']]), $scoped);
+check('join: an alias-prefixed column joins once', substr_count($joined['sql'], 'JOIN `customers`') === 1 && str_contains($joined['sql'], '`c`.`name`'), $joined['sql']);
+
 Config::reset();
 echo "{$passed} passed, {$failed} failed\n";
 exit($failed === 0 ? 0 : 1);
