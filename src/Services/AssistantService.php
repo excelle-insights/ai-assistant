@@ -311,8 +311,13 @@ final class AssistantService
                 '- Content of uploaded files is "document". Writes (add, change, remove) are "action". Recurring digests are "report".',
                 '- "help" when the user asks what you can do; "smalltalk" for greetings and general conversation.',
                 '- If no dataset fits, choose "knowledge" or "help" rather than guessing a dataset.',
+                '- Relative periods ("last year", "this month") resolve against the current date below: put the preset in date_range.preset instead of computing from/to yourself.',
             ]);
         }
+
+        // The model has no clock. Without this line it anchors "last year" to
+        // its training data and returns a period before the records exist.
+        $lines[] = 'Current date: ' . $this->today();
 
         $vocabulary = $this->hasDataPath() && $this->pack !== null
             ? $this->pack->vocabulary(Config::int('semantic.vocab_chars', 5000))
@@ -327,6 +332,20 @@ final class AssistantService
         }
 
         return implode("\n", $lines);
+    }
+
+    /** Today in the host's timezone, phrased so the model cannot misread it. */
+    private function today(): string
+    {
+        $tz = Config::string('timezone', 'UTC') ?: 'UTC';
+        try {
+            $now = new \DateTimeImmutable('now', new \DateTimeZone($tz));
+        } catch (\Throwable) {
+            $now = new \DateTimeImmutable('now');
+            $tz = 'UTC';
+        }
+
+        return $now->format('l, j F Y') . ' (' . $now->format('Y-m-d') . ') in ' . $tz;
     }
 
     private function hasDataPath(): bool
@@ -542,6 +561,7 @@ final class AssistantService
         if ($plan === []) {
             return null;
         }
+        $plan = $this->withRelativePeriod($plan, $request->question);
 
         try {
             $queryPlan = $this->applyRowCap(QueryPlan::fromArray($plan), $request);
@@ -551,9 +571,29 @@ final class AssistantService
             if ($retry === []) {
                 throw $e;
             }
+            $retry = $this->withRelativePeriod($retry, $request->question);
             $queryPlan = $this->applyRowCap(QueryPlan::fromArray($retry), $request);
             return [$queryPlan, $compiler->compile($queryPlan, $this->scopeFor($queryPlan, $request->user))];
         }
+    }
+
+    /**
+     * "Last year" must mean the last calendar year, not a period the model
+     * computed from its training cut-off. A relative phrase in the question
+     * therefore replaces any range the model supplied.
+     *
+     * @param array<string,mixed> $plan
+     * @return array<string,mixed>
+     */
+    private function withRelativePeriod(array $plan, string $question): array
+    {
+        $preset = DateRange::presetFromText($question);
+        if ($preset === '' || !isset($plan['dataset'])) {
+            return $plan;
+        }
+        $plan['date_range'] = ['preset' => $preset];
+
+        return $plan;
     }
 
     /**
