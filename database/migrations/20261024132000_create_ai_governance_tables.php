@@ -76,9 +76,9 @@ final class CreateAiGovernanceTables extends AbstractMigration
         $usage = $this->table($prefix . '_usage_daily', ['id' => false, 'primary_key' => ['company_id', 'stat_date', 'user_id']]);
         if (!$usage->exists()) {
             $usage
-                ->addColumn('company_id', 'integer', ['signed' => false])
-                ->addColumn('stat_date', 'date')
-                ->addColumn('user_id', 'string', ['limit' => 100, 'default' => ''])
+                ->addColumn('company_id', 'integer', ['signed' => false, 'null' => false])
+                ->addColumn('stat_date', 'date', ['null' => false])
+                ->addColumn('user_id', 'string', ['limit' => 100, 'default' => '', 'null' => false])
                 ->addColumn('chats', 'integer', ['signed' => false, 'default' => 0])
                 ->addColumn('tokens_in', 'integer', ['signed' => false, 'default' => 0])
                 ->addColumn('tokens_out', 'integer', ['signed' => false, 'default' => 0])

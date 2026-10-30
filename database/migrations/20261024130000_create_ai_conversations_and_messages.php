@@ -23,7 +23,7 @@ final class CreateAiConversationsAndMessages extends AbstractMigration
         $conversations = $this->table($prefix . '_conversations', ['id' => false, 'primary_key' => ['id']]);
         if (!$conversations->exists()) {
             $conversations
-                ->addColumn('id', 'string', ['limit' => 36])
+                ->addColumn('id', 'string', ['limit' => 36, 'null' => false])
                 ->addColumn('company_id', 'integer', ['signed' => false, 'default' => 0])
                 ->addColumn('user_id', 'string', ['limit' => 100, 'null' => true])
                 ->addColumn('channel', 'string', ['limit' => 30, 'default' => 'web'])
@@ -46,7 +46,7 @@ final class CreateAiConversationsAndMessages extends AbstractMigration
         $messages = $this->table($prefix . '_messages', ['id' => false, 'primary_key' => ['id']]);
         if (!$messages->exists()) {
             $messages
-                ->addColumn('id', 'string', ['limit' => 36])
+                ->addColumn('id', 'string', ['limit' => 36, 'null' => false])
                 ->addColumn('conversation_id', 'string', ['limit' => 36])
                 ->addColumn('company_id', 'integer', ['signed' => false, 'default' => 0])
                 ->addColumn('user_id', 'string', ['limit' => 100, 'null' => true])

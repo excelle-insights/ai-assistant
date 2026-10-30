@@ -24,7 +24,7 @@ final class CreateAiDocumentsAndChunks extends AbstractMigration
         $documents = $this->table($prefix . '_documents', ['id' => false, 'primary_key' => ['id']]);
         if (!$documents->exists()) {
             $documents
-                ->addColumn('id', 'string', ['limit' => 36])
+                ->addColumn('id', 'string', ['limit' => 36, 'null' => false])
                 ->addColumn('company_id', 'integer', ['signed' => false, 'default' => 0])
                 ->addColumn('owner_user_id', 'string', ['limit' => 100, 'null' => true])
                 ->addColumn('scope', 'string', ['limit' => 20, 'default' => 'global'])

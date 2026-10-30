@@ -354,6 +354,9 @@ final class Db
                     . " WHERE `table_schema` = {$schema} AND `table_name` = " . $pdo->quote($table)
                 )->fetchAll(PDO::FETCH_ASSOC);
                 foreach ($rows as $row) {
+                    // MySQL returns information_schema definitions upper-cased, so
+                    // the label is COLUMN_NAME even when selected as `column_name`.
+                    $row = array_change_key_case($row, CASE_LOWER);
                     $names[] = strtolower((string) ($row['column_name'] ?? ''));
                 }
             }

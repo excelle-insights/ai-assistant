@@ -44,7 +44,7 @@ final class CreateAiActionsAndOutbox extends AbstractMigration
         $runs = $this->table($prefix . '_action_runs', ['id' => false, 'primary_key' => ['id']]);
         if (!$runs->exists()) {
             $runs
-                ->addColumn('id', 'string', ['limit' => 36])
+                ->addColumn('id', 'string', ['limit' => 36, 'null' => false])
                 ->addColumn('company_id', 'integer', ['signed' => false, 'default' => 0])
                 ->addColumn('user_id', 'string', ['limit' => 100, 'null' => true])
                 ->addColumn('conversation_id', 'string', ['limit' => 36, 'null' => true])
