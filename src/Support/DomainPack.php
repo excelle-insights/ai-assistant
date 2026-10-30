@@ -42,6 +42,8 @@ final class DomainPack
     private array $entities = [];
     /** @var array<string,array<string,mixed>> */
     private array $actions = [];
+    /** @var array<string,true> tables a pack dataset already answers for */
+    private array $packTables = [];
     /** @var array<int,array<string,mixed>> */
     private array $packs;
     /** @var array<string,array<string,mixed>> */
@@ -132,10 +134,30 @@ final class DomainPack
         return $this->datasets !== [];
     }
 
-    /** @return array<string,mixed>|null */
+    /**
+     * The user's word may be a synonym a host declared ("projects" for the
+     * listings dataset) or the human label, so both resolve to the same entry.
+     *
+     * @return array<string,mixed>|null
+     */
     public function dataset(string $name): ?array
     {
-        return $this->datasets[self::key($name)] ?? null;
+        $key = self::key($name);
+        if (isset($this->datasets[$key])) {
+            return $this->datasets[$key];
+        }
+        foreach ($this->datasets as $dataset) {
+            if (self::key((string) ($dataset['label'] ?? '')) === $key) {
+                return $dataset;
+            }
+            foreach ((array) ($dataset['aliases'] ?? []) as $alias) {
+                if (self::key((string) $alias) === $key) {
+                    return $dataset;
+                }
+            }
+        }
+
+        return null;
     }
 
     public function tableOf(string $name): string
@@ -254,6 +276,10 @@ final class DomainPack
             if ((string) $dataset['date_field'] !== '') {
                 $line .= ' date[' . (string) $dataset['date_field'] . ']';
             }
+            $aliases = array_values(array_filter(array_map('strval', (array) ($dataset['aliases'] ?? []))));
+            if ($aliases !== []) {
+                $line .= ' also[' . implode(', ', $aliases) . ']';
+            }
             $description = trim((string) ($dataset['description'] ?? ''));
             if ($description !== '') {
                 $line .= ' — ' . $description;
@@ -310,6 +336,7 @@ final class DomainPack
             $dataset = $this->normaliseDataset($raw, $packName);
             if ($dataset !== null) {
                 $this->datasets[$dataset['key']] = $dataset;
+                $this->packTables[self::key((string) $dataset['table'])] = true;
             }
         }
         foreach ((array) ($pack['entities'] ?? []) as $raw) {
@@ -340,7 +367,11 @@ final class DomainPack
     {
         $added = 0;
         foreach ($this->catalog as $tableName => $entry) {
-            if (isset($this->datasets[self::key((string) $tableName)]) || $added >= $maxDatasets) {
+            if (
+                isset($this->datasets[self::key((string) $tableName)])
+                || isset($this->packTables[self::key((string) $tableName)])
+                || $added >= $maxDatasets
+            ) {
                 continue;
             }
             $columns = (array) ($entry['columns'] ?? []);
@@ -463,6 +494,10 @@ final class DomainPack
             'table' => $table,
             'label' => trim((string) ($raw['label'] ?? SchemaHints::label($name))),
             'description' => trim((string) ($raw['description'] ?? '')),
+            'aliases' => array_values(array_filter(array_map(
+                static fn ($alias): string => trim((string) $alias),
+                (array) ($raw['aliases'] ?? $raw['synonyms'] ?? [])
+            ), static fn (string $alias): bool => $alias !== '')),
             'date_field' => trim((string) ($raw['date_field'] ?? $raw['date'] ?? '')),
             // Legacy hosts often keep dates as strings ("01-04-2025"). The compiler
             // wraps the date field in STR_TO_DATE with this format so period filters

@@ -281,6 +281,22 @@ final class AssistantService
         if ($this->hasDataPath() && preg_match('/\b(how many|how much|total|average|count|list|show|top|best|worst|compare|trend|revenue|sum|chart|export|per |by )\b/', $t) === 1) {
             return 'data';
         }
+        // "all listings", "projects", "users" — naming something the pack can
+        // answer is a data request even without a measure word.
+        if ($this->hasDataPath() && $this->pack !== null) {
+            foreach ($this->pack->listDatasets() as $def) {
+                $names = array_merge(
+                    [(string) ($def['name'] ?? ''), (string) ($def['label'] ?? '')],
+                    array_map('strval', (array) ($def['aliases'] ?? []))
+                );
+                foreach ($names as $name) {
+                    $needle = strtolower(trim($name));
+                    if ($needle !== '' && preg_match('/\b' . preg_quote($needle, '/') . '\b/', $t) === 1) {
+                        return 'data';
+                    }
+                }
+            }
+        }
         if ($this->knowledge !== null && preg_match('/\b(policy|price|prices|rate|rates|discount|hours|opening|warranty|refund|procedure|process)\b/', $t) === 1) {
             return 'knowledge';
         }
@@ -307,9 +323,13 @@ final class AssistantService
                 'Rules:',
                 '- Use only names that appear in the vocabulary. Never invent a column, table or SQL.',
                 '- Anything countable is intent "data": a number must come from a query, never from memory.',
+                '- A dataset name on its own is still "data" — "all listings", "show projects", "users", "tasks" must return rows, not help text.',
+                '- A word in also[...] or a dataset label is the same dataset (for example "projects" or "properties" for listings). Resolve it to the dataset name.',
+                '- date[field] in the vocabulary marks the dataset\'s own date column. Use it only through date_range; never put that field in dimensions, filters, metrics or order_by.',
+                '- Time words ("this month", "last year", "today") always become date_range, never a filter on a date column.',
                 '- Facts the user typed in (prices, policies, instructions) are intent "knowledge".',
                 '- Content of uploaded files is "document". Writes (add, change, remove) are "action". Recurring digests are "report".',
-                '- "help" when the user asks what you can do; "smalltalk" for greetings and general conversation.',
+                '- "help" only when the user asks what you can do or how to use you; "smalltalk" for greetings and general conversation.',
                 '- If no dataset fits, choose "knowledge" or "help" rather than guessing a dataset.',
                 '- Relative periods ("last year", "this month") resolve against the current date below: put the preset in date_range.preset instead of computing from/to yourself.',
             ]);
@@ -477,7 +497,13 @@ final class AssistantService
         }
 
         if ($result->isEmpty() || self::isZeroAggregate($result, $compiled)) {
-            return $this->emptyDataAnswer($request, (array) ($compiled['applied_filters'] ?? []), $result, $compiled);
+            return $this->emptyDataAnswer(
+                $request,
+                (array) ($compiled['applied_filters'] ?? []),
+                $result,
+                $compiled,
+                $this->latestPeriod($compiled, $user)
+            );
         }
 
         $export = $this->exportFor($request, $result, $compiled);
@@ -561,7 +587,7 @@ final class AssistantService
         if ($plan === []) {
             return null;
         }
-        $plan = $this->withRelativePeriod($plan, $request->question);
+        $plan = $this->preparePlanShape($plan, $request->question);
 
         try {
             $queryPlan = $this->applyRowCap(QueryPlan::fromArray($plan), $request);
@@ -571,10 +597,185 @@ final class AssistantService
             if ($retry === []) {
                 throw $e;
             }
-            $retry = $this->withRelativePeriod($retry, $request->question);
+            $retry = $this->preparePlanShape($retry, $request->question);
             $queryPlan = $this->applyRowCap(QueryPlan::fromArray($retry), $request);
             return [$queryPlan, $compiler->compile($queryPlan, $this->scopeFor($queryPlan, $request->user))];
         }
+    }
+
+    /**
+     * @param array<string,mixed> $plan
+     * @return array<string,mixed>
+     */
+    private function preparePlanShape(array $plan, string $question): array
+    {
+        $plan = $this->withDateFieldFixes($plan);
+
+        return $this->withRelativePeriod($this->withDefaultShape($plan, $question), $question);
+    }
+
+    /**
+     * Models keep treating the dataset's date column as a dimension or a filter
+     * ("Unknown field post_date"). The date column belongs to date_range only,
+     * so a filter on it becomes a range, and a date column named as a dimension
+     * or sort key is dropped (the compiler orders by it automatically).
+     *
+     * @param array<string,mixed> $plan
+     * @return array<string,mixed>
+     */
+    private function withDateFieldFixes(array $plan): array
+    {
+        if ($this->pack === null || !isset($plan['dataset']) || !is_string($plan['dataset'])) {
+            return $plan;
+        }
+        $dataset = $this->pack->dataset($plan['dataset']);
+        if ($dataset === null) {
+            return $plan;
+        }
+        $dateField = strtolower(trim((string) ($dataset['date_field'] ?? '')));
+        if ($dateField === '') {
+            return $plan;
+        }
+        $table = strtolower(trim((string) ($dataset['table'] ?? '')));
+        $isDateField = static function (mixed $field) use ($dateField, $table): bool {
+            $key = strtolower(trim((string) $field));
+            if ($key === '') {
+                return false;
+            }
+            $short = str_contains($key, '.') ? substr($key, (int) strrpos($key, '.') + 1) : $key;
+            return $short === $dateField || ($table !== '' && $key === $table . '.' . $dateField);
+        };
+
+        $from = '';
+        $to = '';
+        $filters = [];
+        foreach ((array) ($plan['filters'] ?? []) as $filter) {
+            if (!is_array($filter) || !$isDateField($filter['field'] ?? '')) {
+                $filters[] = $filter;
+                continue;
+            }
+            $operator = strtolower(trim((string) ($filter['operator'] ?? '=')));
+            $value = $filter['value'] ?? null;
+            if ($operator === 'between') {
+                $pair = array_values((array) $value);
+                [$from, $to] = [self::dateBound((string) ($pair[0] ?? ''), true), self::dateBound((string) ($pair[1] ?? ''), false)];
+                continue;
+            }
+            if (in_array($operator, ['>=', '>'], true)) {
+                $from = self::dateBound((string) $value, true);
+                continue;
+            }
+            if (in_array($operator, ['<=', '<'], true)) {
+                $to = self::dateBound((string) $value, false);
+                continue;
+            }
+            [$open, $close] = [self::dateBound((string) $value, true), self::dateBound((string) $value, false)];
+            if ($open !== '') {
+                $from = $open;
+                $to = $close;
+            }
+        }
+        $plan['filters'] = $filters;
+        if ($from !== '' || $to !== '') {
+            $plan['date_range'] = array_filter(['from' => $from, 'to' => $to]);
+        }
+        foreach (['dimensions', 'metrics'] as $key) {
+            if (isset($plan[$key]) && is_array($plan[$key])) {
+                $plan[$key] = array_values(array_filter($plan[$key], static fn ($field): bool => !$isDateField($field)));
+            }
+        }
+        if (isset($plan['order_by']) && is_array($plan['order_by'])) {
+            $plan['order_by'] = array_values(array_filter(
+                $plan['order_by'],
+                static fn ($clause): bool => !is_array($clause) || !$isDateField($clause['field'] ?? '')
+            ));
+        }
+
+        return $plan;
+    }
+
+    /** One ISO bound ("2026-08" covers the whole month) for a date field filter. */
+    private static function dateBound(string $value, bool $start): string
+    {
+        $text = trim($value);
+        if ($text === '') {
+            return '';
+        }
+        if (preg_match('/^(\d{4})-(\d{2})$/', $text) === 1) {
+            return $start ? $text . '-01' : (new \DateTimeImmutable($text . '-01'))->format('Y-m-t');
+        }
+        if (preg_match('/^(\d{4})$/', $text) === 1) {
+            return $start ? $text . '-01-01' : $text . '-12-31';
+        }
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $text) === 1) {
+            return $text;
+        }
+        try {
+            $date = new \DateTimeImmutable($text);
+            $hasDay = preg_match('/(?<!\d)\d{1,2}(?!\d)/', $text) === 1;
+            if (!$hasDay) {
+                return $start ? $date->format('Y-m-01') : $date->format('Y-m-t');
+            }
+            return $date->format('Y-m-d');
+        } catch (\Throwable) {
+            return '';
+        }
+    }
+
+    /**
+     * "All listings" names a dataset but no measure or field. A bare dataset
+     * request answers with rows (the record title first); when the question
+     * asks for a number, it answers with the dataset's count metric instead of
+     * failing the compiler's "selected nothing" check.
+     *
+     * @param array<string,mixed> $plan
+     * @return array<string,mixed>
+     */
+    private function withDefaultShape(array $plan, string $question): array
+    {
+        if ($this->pack === null || !isset($plan['dataset']) || !is_string($plan['dataset'])) {
+            return $plan;
+        }
+        $metrics = (array) ($plan['metrics'] ?? []);
+        $dimensions = (array) ($plan['dimensions'] ?? []);
+        if ($metrics !== [] || $dimensions !== []) {
+            return $plan;
+        }
+        $dataset = $this->pack->dataset($plan['dataset']);
+        if ($dataset === null) {
+            return $plan;
+        }
+
+        $wantsNumber = preg_match('/\b(how many|how much|count|total|number of|average|sum|revenue|trend|conversion)\b/i', $question) === 1;
+        if ($wantsNumber) {
+            foreach ((array) ($dataset['metrics'] ?? []) as $metric) {
+                if (($metric['function'] ?? '') === 'count') {
+                    $plan['metrics'] = [(string) ($metric['name'] ?? '')];
+                    return $plan;
+                }
+            }
+            $first = (string) ($dataset['metrics'][0]['name'] ?? '');
+            if ($first !== '') {
+                $plan['metrics'] = [$first];
+            }
+            return $plan;
+        }
+
+        $preferred = ['title', 'name', 'unit', 'serial', 'client', 'project', 'month'];
+        foreach ((array) ($dataset['dimensions'] ?? []) as $dimension) {
+            if (in_array((string) ($dimension['name'] ?? ''), $preferred, true)) {
+                $plan['dimensions'] = [(string) $dimension['name']];
+                return $plan;
+            }
+        }
+        foreach ((array) ($dataset['dimensions'] ?? []) as $dimension) {
+            if ((string) ($dimension['format'] ?? '') !== 'date') {
+                $plan['dimensions'] = [(string) ($dimension['name'] ?? '')];
+                break;
+            }
+        }
+
+        return $plan;
     }
 
     /**
@@ -653,7 +854,11 @@ final class AssistantService
         foreach ($this->pack->listDatasets() as $def) {
             $name = (string) ($def['name'] ?? '');
             $best = 0;
-            foreach ([$name, (string) ($def['label'] ?? ''), (string) ($def['table'] ?? ''), rtrim($name, 's')] as $alias) {
+            $candidates = array_merge(
+                [$name, (string) ($def['label'] ?? ''), (string) ($def['table'] ?? ''), rtrim($name, 's')],
+                array_map('strval', (array) ($def['aliases'] ?? []))
+            );
+            foreach ($candidates as $alias) {
                 $alias = trim((string) $alias);
                 if ($alias === '') {
                     continue;
@@ -1216,22 +1421,100 @@ final class AssistantService
     }
 
     /**
+     * When a period returns nothing, the useful fact is usually that the data
+     * ends earlier. One extra grouped query (only on empty answers) finds the
+     * latest month that does have records, so a zero is not a dead end.
+     *
+     * @param array<string,mixed> $compiled
+     * @return array{dataset:string,month:string,metric:string,value:string}|array{}
+     */
+    private function latestPeriod(array $compiled, UserContext $user): array
+    {
+        if ($this->compiler === null || !isset($this->hooks['rows']) || $this->pack === null) {
+            return [];
+        }
+        $datasetName = (string) ($compiled['dataset'] ?? '');
+        $dataset = $datasetName !== '' ? $this->pack->dataset($datasetName) : null;
+        if ($dataset === null || $this->pack->dimension($datasetName, 'month') === null) {
+            return [];
+        }
+        $metric = null;
+        foreach ((array) ($dataset['metrics'] ?? []) as $candidate) {
+            if (($candidate['function'] ?? '') === 'count') {
+                $metric = (string) ($candidate['name'] ?? '');
+                break;
+            }
+        }
+        if ($metric === null || $metric === '') {
+            return [];
+        }
+
+        try {
+            $probe = QueryPlan::fromArray([
+                'dataset' => $datasetName,
+                'metrics' => [$metric],
+                'dimensions' => ['month'],
+                'order_by' => [['field' => 'month', 'direction' => 'desc']],
+                'limit' => 1,
+            ]);
+            $probeCompiled = $this->compiler->compile($probe, $this->scopeFor($probe, $user));
+            $probeRows = $this->rowsFromHook($probeCompiled, $user)->rows;
+        } catch (\Throwable) {
+            return [];
+        }
+        $row = is_array($probeRows[0] ?? null) ? array_values($probeRows[0]) : [];
+        $month = (string) ($row[0] ?? '');
+        if ($month === '') {
+            return [];
+        }
+        $value = $row[1] ?? null;
+
+        try {
+            $month = (new \DateTimeImmutable($month . '-01'))->format('F Y');
+        } catch (\Throwable) {
+            // Keep the stored value when it is not a YYYY-MM string.
+        }
+
+        $metricDef = $this->pack->metric($datasetName, $metric);
+
+        return [
+            'dataset' => (string) ($dataset['label'] ?? $datasetName),
+            'month' => $month,
+            'metric' => (string) (($metricDef['label'] ?? '') !== '' ? $metricDef['label'] : $metric),
+            'value' => is_numeric($value) ? number_format((float) $value) : (string) $value,
+        ];
+    }
+
+    /**
      * "Nothing matched" is an answer, and it must not be dressed up as a number.
      * A COUNT/SUM that legitimately returned zero keeps its row as the evidence
      * the query really ran; a result set with no rows has nothing to show.
      *
      * @param array<string,mixed> $appliedFilters
      * @param array<string,mixed> $compiled
+     * @param array<string,mixed> $latest
      */
-    private function emptyDataAnswer(AskRequest $request, array $appliedFilters, ?QueryResult $result = null, array $compiled = []): Answer
-    {
+    private function emptyDataAnswer(
+        AskRequest $request,
+        array $appliedFilters,
+        ?QueryResult $result = null,
+        array $compiled = [],
+        array $latest = []
+    ): Answer {
         $scope = self::filterSentence($appliedFilters);
         $hasZeroRow = $result !== null && !$result->isEmpty();
+        $hint = '';
+        if ($latest !== []) {
+            $hint = ' The most recent ' . strtolower((string) $latest['dataset'])
+                . ' in AMS are from ' . $latest['month']
+                . ' (' . $latest['metric'] . ': ' . $latest['value'] . ')'
+                . ', so this period sits after the latest records.';
+        }
 
         return new Answer(
             text: 'I found no matching records' . ($scope !== '' ? ' ' . $scope : '')
-                . '. That is a real answer, not a missing one: the query ran and nothing matched. '
-                . 'Try a wider period or a different filter.',
+                . '. That is a real answer, not a missing one: the query ran and nothing matched.' . $hint
+                . ' Try a wider period or a different filter.',
             intent: 'data',
             rows: $hasZeroRow ? $result->rows : [],
             citations: $hasZeroRow ? $this->dataCitations($compiled, $result) : [],
