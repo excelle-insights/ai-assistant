@@ -301,6 +301,9 @@ return [
         'session_turns' => (int) $env(['AI_ASSISTANT_SESSION_TURNS', 'AI_WHATSAPP_SESSION_TURNS'], 10),
         'session_ttl_minutes' => (int) $env(['AI_ASSISTANT_SESSION_TTL'], 60),
         'memory_turns' => (int) $env(['AI_ASSISTANT_MEMORY_TURNS'], 10),
+        // Rows a re-opened thread re-renders. 0 keeps table values (decrypted
+        // names, for example) out of the conversation store at rest.
+        'store_rows' => (int) $env(['AI_ASSISTANT_STORE_ROWS'], 50),
         // Turns kept in the prompt before older ones are summarised away. 0 = never.
         'summarize_after' => (int) $env(['AI_ASSISTANT_SUMMARIZE_AFTER'], 24),
         // Rows a single audit CSV export may contain.

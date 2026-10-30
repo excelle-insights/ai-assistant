@@ -527,6 +527,18 @@ badAnswer('conversations: dead link closed', $api->sharedConversation((string) $
 okAnswer('conversations: searched', $api->searchConversations(7, 'orders'));
 okAnswer('conversations: summarised', $api->summarizeConversation($threadId));
 
+// A host whose tables carry decrypted PII can keep those rows out of the store;
+// the live answer still carries them.
+Config::set('limits.store_rows', 0);
+$privacy = $api->chat('how many orders', apiUser(['thread_id' => 'privacy-thread']));
+Config::set('limits.store_rows', 50);
+okAnswer('rows at rest: live answer keeps its rows', $privacy);
+same('rows at rest: rows in the answer', 2, (int) ($privacy['answer']['rows'][0]['records'] ?? 0));
+$privacyId = (string) ($privacy['answer']['meta']['conversation_id'] ?? '');
+$stored = $api->getConversation($privacyId);
+okAnswer('rows at rest: thread readable', $stored);
+same('rows at rest: nothing written to the store', 0, count((array) ($stored['turns']['messages'][1]['rows'] ?? [])));
+
 // ─── knowledge ───────────────────────────────────────────────────────────────
 
 $added = $api->addKnowledge(7, ['title' => 'Refunds', 'content' => 'Refunds are 30 days.', 'category' => 'policy']);

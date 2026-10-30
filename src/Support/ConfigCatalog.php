@@ -478,6 +478,11 @@ final class ConfigCatalog
             'column' => 'limits_json', 'type' => 'int', 'default' => 10, 'min' => 1,
             'label' => 'Turns replayed into a prompt',
         ],
+        'limits.store_rows' => [
+            'column' => 'limits_json', 'type' => 'int', 'default' => 50, 'min' => 0,
+            'label' => 'Rows kept in chat history',
+            'help' => 'Rows a re-opened thread re-renders. 0 stores none, so values shown in a table (decrypted names, for example) are never written at rest.',
+        ],
         'limits.summarize_after' => [
             'column' => 'limits_json', 'type' => 'int', 'default' => 24, 'min' => 0,
             'label' => 'Summarise after N turns',
