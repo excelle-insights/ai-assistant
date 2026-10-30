@@ -503,7 +503,7 @@ final class QueryCompiler
                 if (in_array($lower, self::ALLOWED_WORDS, true)) {
                     continue;
                 }
-                $isTable = in_array($lower, array_merge(array_column($known, 'table'), [DomainPack::key($table)]), true);
+                $isTable = in_array(DomainPack::key($lower), array_merge(array_column($known, 'table'), [DomainPack::key($table)]), true);
                 $isColumn = in_array($lower, array_column($known, 'column'), true);
                 // With no schema attached nothing is verifiable; the pack itself
                 // is the authority and the identifier test is skipped.

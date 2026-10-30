@@ -306,6 +306,20 @@ $joined = (new QueryCompiler($joinedPack, new SchemaPolicy(), $tableColumns))
     ->compile(QueryPlan::fromArray(['dataset' => 'orders', 'dimensions' => ['customer']]), $scoped);
 check('join: an alias-prefixed column joins once', substr_count($joined['sql'], 'JOIN `customers`') === 1 && str_contains($joined['sql'], '`c`.`name`'), $joined['sql']);
 
+// A pack writes the real table name; the compiler keys names without underscores.
+$tableColumns['order_items'] = ['id', 'created_at', 'total_amount'];
+$underscored = new DomainPack([[
+    'name' => 'x',
+    'datasets' => [[
+        'name' => 'order_items', 'table' => 'order_items', 'date_field' => 'created_at',
+        'metrics' => [['name' => 'total', 'function' => 'expr', 'expr' => 'SUM(order_items.total_amount)']],
+        'dimensions' => [['name' => 'month', 'expr' => "DATE_FORMAT(order_items.created_at, '%Y-%m')"]],
+    ]],
+]], $catalog, ['auto_derive' => false]);
+$grouped = (new QueryCompiler($underscored, new SchemaPolicy(), $tableColumns))
+    ->compile(QueryPlan::fromArray(['dataset' => 'order_items', 'metrics' => ['total'], 'dimensions' => ['month']]), $scoped);
+check('expression: an underscored table name resolves', str_contains($grouped['sql'], 'order_items.created_at') && str_contains($grouped['sql'], 'SUM(order_items.total_amount)'), $grouped['sql']);
+
 Config::reset();
 echo "{$passed} passed, {$failed} failed\n";
 exit($failed === 0 ? 0 : 1);
