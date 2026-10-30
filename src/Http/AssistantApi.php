@@ -1691,7 +1691,9 @@ final class AssistantApi
             $catalog = $options['catalog'] ?? null;
             if (!is_array($catalog)) {
                 try {
-                    $catalog = $this->schema()->catalog(false);
+                    // Policy-filtered: a blocked table must not become a dataset
+                    // just because its structure is still in the catalogue.
+                    $catalog = $this->schema()->catalog(true);
                 } catch (Throwable) {
                     $catalog = [];
                 }

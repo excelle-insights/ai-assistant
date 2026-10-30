@@ -121,6 +121,17 @@ check('vocab: never leaks a secret column', !str_contains($vocabulary, 'password
 check('vocab: mentions the date field', str_contains($vocabulary, 'date[created_at]'));
 check('vocab: budget respected', strlen($auto->vocabulary(120, 2)) <= 400, (string) strlen($auto->vocabulary(120, 2)));
 
+$verbose = new DomainPack([[
+    'name' => 'crm',
+    'datasets' => [
+        ['name' => 'leads', 'table' => 'leads', 'description' => str_repeat('sales pipeline context ', 40)],
+        ['name' => 'users', 'table' => 'users', 'aliases' => ['people', 'staff'], 'description' => 'Accounts'],
+    ],
+]], []);
+$trimmed = $verbose->vocabulary();
+check('vocab: long descriptions are trimmed', strlen($trimmed) < 1200, (string) strlen($trimmed));
+check('vocab: a long description never hides a later dataset', str_contains($verbose->vocabulary(300), 'users(people, staff)'), $verbose->vocabulary(300));
+
 // ─── DomainPack: host pack wins, and auto-derivation stands down ──────────────
 $packs = [[
     'name' => 'sales',

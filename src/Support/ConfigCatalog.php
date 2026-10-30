@@ -242,7 +242,7 @@ final class ConfigCatalog
             'label' => 'Roles allowed raw SQL',
         ],
         'semantic.vocab_chars' => [
-            'column' => 'semantic_json', 'type' => 'int', 'default' => 5000, 'min' => 500,
+            'column' => 'semantic_json', 'type' => 'int', 'default' => 12000, 'min' => 500,
             'label' => 'Vocabulary budget (characters)',
         ],
         'metrics.auto' => [

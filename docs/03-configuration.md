@@ -380,7 +380,7 @@ per-user one. `knowledge`, `schedules` and `outreach` are recognised too.
 | `semantic.max_dimensions` | `14` | int | `AI_ASSISTANT_SEMANTIC_MAX_DIMENSIONS` |
 | `semantic.allow_raw_sql` | `false` | yes/no | `AI_ASSISTANT_ALLOW_RAW_SQL` |
 | `semantic.raw_sql_roles` | `admin,owner` | list | `AI_ASSISTANT_RAW_SQL_ROLES` |
-| `semantic.vocab_chars` | `5000` | int | `AI_ASSISTANT_VOCAB_CHARS` |
+| `semantic.vocab_chars` | `12000` | int | `AI_ASSISTANT_VOCAB_CHARS` |
 | `metrics.auto` | `true` | yes/no | `AI_ASSISTANT_METRICS_AUTO` |
 | `metrics.auto_max_tables` | `40` | int | `AI_ASSISTANT_METRICS_MAX_TABLES` |
 | `metrics.custom` | `[]` | JSON | `AI_ASSISTANT_METRICS` |
