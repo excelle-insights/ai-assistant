@@ -37,7 +37,7 @@ final class QueryCompiler
         'ABS', 'AVG', 'CEIL', 'CEILING', 'COALESCE', 'CONCAT', 'CONCAT_WS', 'COUNT', 'DATE', 'DATE_FORMAT',
         'DAY', 'DAYOFWEEK', 'DISTINCT', 'EXTRACT', 'FLOOR', 'GREATEST', 'IF', 'IFNULL', 'LEAST', 'LEFT',
         'LENGTH', 'LOWER', 'MAX', 'MIN', 'MONTH', 'NOW', 'NULLIF', 'QUARTER', 'REPLACE', 'RIGHT', 'ROUND',
-        'SUBSTRING', 'SUM', 'TIMESTAMPDIFF', 'TRIM', 'UPPER', 'WEEK', 'YEAR',
+        'STR_TO_DATE', 'SUBSTRING', 'SUM', 'TIMESTAMPDIFF', 'TRIM', 'UPPER', 'WEEK', 'YEAR',
     ];
 
     /** Words that may appear in an expression besides identifiers and functions. */
@@ -428,6 +428,27 @@ final class QueryCompiler
     }
 
     /**
+     * Legacy hosts frequently store dates as VARCHAR ("01-04-2025"). When the
+     * dataset declares a date_format, the raw column is wrapped in STR_TO_DATE
+     * so period filters and default ordering compare chronologically.
+     *
+     * @param array<int,array{table:string,alias:string}> $joins
+     * @param string[] $hidden
+     */
+    private function dateColumnSql(array $dataset, string $reference, string $table, array $joins, array $hidden): string
+    {
+        $column = $this->columnSql($reference, $table, $joins, $hidden);
+        $format = trim((string) ($dataset['date_format'] ?? ''));
+        if ($format === '') {
+            return $column;
+        }
+        if (preg_match('/^[%a-zA-Z0-9: _-]+$/', $format) !== 1) {
+            throw new \InvalidArgumentException('Unsafe date format in the domain pack: "' . $format . '".');
+        }
+        return 'STR_TO_DATE(' . $column . ", '" . str_replace("'", "''", $format) . "')";
+    }
+
+    /**
      * Pack-authored expression, e.g. DATE_FORMAT(orders.created_at, '%Y-%m').
      * Literals pass through untouched; every identifier is checked against the
      * tables in this query, only whitelisted functions are allowed, and a bare
@@ -542,7 +563,7 @@ final class QueryCompiler
             return ['sql' => [], 'labels' => ['period' => trim(implode(' ', array_filter($range)))]];
         }
         $resolved = DateRange::resolve($range, self::timezone());
-        $column = $this->columnSql($field, $table, $joins, $hidden);
+        $column = $this->dateColumnSql($dataset, $field, $table, $joins, $hidden);
         $sql = [];
         if (!empty($resolved['from'])) {
             $bind[':from'] = (string) $resolved['from'];
@@ -763,7 +784,7 @@ final class QueryCompiler
 
         $dateField = trim((string) ($dataset['date_field'] ?? ''));
         if ($dateField !== '' && ($this->columns === [] || $this->hasColumn($table, $dateField))) {
-            return $this->columnSql($dateField, $table, $joins, $hidden) . ' DESC';
+            return $this->dateColumnSql($dataset, $dateField, $table, $joins, $hidden) . ' DESC';
         }
         return $columns === [] ? '' : '`' . Db::identifier($columns[0]) . '` ASC';
     }

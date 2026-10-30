@@ -464,6 +464,10 @@ final class DomainPack
             'label' => trim((string) ($raw['label'] ?? SchemaHints::label($name))),
             'description' => trim((string) ($raw['description'] ?? '')),
             'date_field' => trim((string) ($raw['date_field'] ?? $raw['date'] ?? '')),
+            // Legacy hosts often keep dates as strings ("01-04-2025"). The compiler
+            // wraps the date field in STR_TO_DATE with this format so period filters
+            // and default ordering compare chronologically.
+            'date_format' => trim((string) ($raw['date_format'] ?? '')),
             'metrics' => $metrics,
             'dimensions' => $dimensions,
             'joins' => array_values(array_filter((array) ($raw['joins'] ?? []), 'is_array')),
