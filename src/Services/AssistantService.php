@@ -318,7 +318,7 @@ final class AssistantService
                 'For intent "data" the plan object is:',
                 '{"dataset":"name","metrics":["name"],"dimensions":["name"],'
                 . '"filters":[{"field":"name","operator":"=|!=|>|>=|<|<=|like|contains|in|not_in|between|is_null|not_null","value":null}],'
-                . '"date_range":{"preset":"last_30_days"} or {"from":"YYYY-MM-DD","to":"YYYY-MM-DD"},'
+                . '"date_range":null,'
                 . '"order_by":[{"field":"name","direction":"desc"}],"limit":20,"chart":"bar|line|area|pie|scatter|kpi|""}',
                 'Rules:',
                 '- Use only names that appear in the vocabulary. Never invent a column, table or SQL.',
@@ -327,6 +327,7 @@ final class AssistantService
                 '- A word in also[...] or a dataset label is the same dataset (for example "projects" or "properties" for listings). Resolve it to the dataset name.',
                 '- date[field] in the vocabulary marks the dataset\'s own date column. Use it only through date_range; never put that field in dimensions, filters, metrics or order_by.',
                 '- Time words ("this month", "last year", "today") always become date_range, never a filter on a date column.',
+                '- Include date_range only when the question names a period ("this month", "last year", a date or a year). "All users", "all listings" and "show me tasks" mean every record: date_range must be null.',
                 '- Facts the user typed in (prices, policies, instructions) are intent "knowledge".',
                 '- Content of uploaded files is "document". Writes (add, change, remove) are "action". Recurring digests are "report".',
                 '- "help" only when the user asks what you can do or how to use you; "smalltalk" for greetings and general conversation.',
@@ -610,8 +611,40 @@ final class AssistantService
     private function preparePlanShape(array $plan, string $question): array
     {
         $plan = $this->withDateFieldFixes($plan);
+        $plan = $this->withRelativePeriod($this->withDefaultShape($plan, $question), $question);
 
-        return $this->withRelativePeriod($this->withDefaultShape($plan, $question), $question);
+        return $this->withPeriodGuard($plan, $question);
+    }
+
+    /**
+     * "All users in this system?" has no period, but models copy the prompt's
+     * date_range example and invent "last 30 days", which then hides every row.
+     * A range is only honoured when the question itself names a period.
+     *
+     * @param array<string,mixed> $plan
+     * @return array<string,mixed>
+     */
+    private function withPeriodGuard(array $plan, string $question): array
+    {
+        if (!isset($plan['date_range']) || $this->questionNamesPeriod($question)) {
+            return $plan;
+        }
+        unset($plan['date_range']);
+
+        return $plan;
+    }
+
+    /** Relative presets, explicit dates, years and month names. */
+    private function questionNamesPeriod(string $question): bool
+    {
+        if (DateRange::presetFromText($question) !== '') {
+            return true;
+        }
+
+        return preg_match(
+            '/\b(\d{4}-\d{2}(?:-\d{2})?|(?:19|20)\d{2}|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|since|until|till|before|after|between|as of|ytd|mtd)\b/i',
+            $question
+        ) === 1;
     }
 
     /**
@@ -1512,8 +1545,7 @@ final class AssistantService
         }
 
         return new Answer(
-            text: 'I found no matching records' . ($scope !== '' ? ' ' . $scope : '')
-                . '. That is a real answer, not a missing one: the query ran and nothing matched.' . $hint
+            text: 'No matching records' . ($scope !== '' ? ' ' . $scope : '') . '.' . $hint
                 . ' Try a wider period or a different filter.',
             intent: 'data',
             rows: $hasZeroRow ? $result->rows : [],

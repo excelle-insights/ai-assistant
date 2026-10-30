@@ -335,6 +335,17 @@ $seen = [];
 $capping->ask('list the orders', $user, ['max_rows' => 0]);
 same('max_rows: no ceiling means the configured default limit', 20, (int) ($seen['limit'] ?? 0));
 
+// ─── a period the question never asked for is dropped ─────────────────────────
+$invented = service(new ScriptedLlm(['intent' => 'data', 'plan' => [
+    'dataset' => 'orders', 'metrics' => ['records'], 'date_range' => ['preset' => 'last_7_days'],
+]]))->ask('all orders in this system?', $user);
+same('period: an invented range is dropped', 3, (int) first_value($invented->rows));
+
+$asked = service(new ScriptedLlm(['intent' => 'data', 'plan' => [
+    'dataset' => 'orders', 'metrics' => ['records'], 'date_range' => ['preset' => 'last_7_days'],
+]]))->ask('orders from the last 7 days', $user);
+same('period: a range the question names is kept', 0, (int) first_value($asked->rows));
+
 // ─── scope the model never sees ───────────────────────────────────────────────
 $perms = new ScopedPermissions('customer_id = 42');
 $scoped = service(new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records']]]), [], new ArrayStore(), $perms);
