@@ -289,7 +289,10 @@ An `openai` block is kept as a legacy alias for the same four values.
 
 `allowlist` is the production recommendation: only `allowed_tables` are
 queryable. `denylist` is the zero-authoring default (everything except
-`blocked_tables`). `all` means everything except the package's own tables.
+`blocked_tables`). `all` means every table except `blocked_tables` and the
+package's own tables. A `blocked_tables` entry may be a glob (`arrowchat*`,
+`*_logs`), so whole families of plugin, audit or credential tables stay out
+without listing each one.
 Switching a company to `allowlist` is one row:
 
 ```php

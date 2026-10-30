@@ -147,7 +147,7 @@ final class SchemaPolicy
             return false;
         }
         $blocked = $this->blockedTables();
-        if (in_array($t, $blocked, true)) {
+        if (in_array($t, $blocked, true) || $this->matchesBlockedPattern($t, $blocked)) {
             return false;
         }
         $hostVote = $this->host?->allowsTable($t, $this->context());
@@ -297,6 +297,22 @@ final class SchemaPolicy
     }
 
     /** @return string[] */
+    /**
+     * A blocked entry may be a glob ("arrowchat*", "*_logs") so a host can keep
+     * whole families of plugin/audit tables out without listing every one.
+     *
+     * @param string[] $patterns
+     */
+    private function matchesBlockedPattern(string $table, array $patterns): bool
+    {
+        foreach ($patterns as $pattern) {
+            if ((str_contains($pattern, '*') || str_contains($pattern, '?')) && fnmatch($pattern, $table)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private function normalise(array $names): array
     {
         $out = [];

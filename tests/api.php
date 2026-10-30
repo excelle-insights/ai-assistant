@@ -582,7 +582,7 @@ $saved = $api->saveColumnDescription('orders', 'total_amount', 'What the custome
 ]);
 okAnswer('schema: description saved', $saved);
 same('schema: written', true, $saved['saved']);
-badAnswer('schema: needs a table', $api->saveColumnDescription('', 'total_amount', 'x'), 'table and the column');
+badAnswer('schema: needs a table', $api->saveColumnDescription('', 'total_amount', 'x'), 'needs the table');
 
 $catalog = $api->schemaCatalog();
 okAnswer('schema: catalog read', $catalog);
@@ -590,6 +590,11 @@ same('schema: user words win', 'What the customer paid, in ZAR, including delive
 $listSchema = $api->listSchema();
 okAnswer('schema: rows listed', $listSchema);
 same('schema: one column catalogued', 1, count($listSchema['items'] ?? []));
+$tableCard = $api->saveColumnDescription('orders', '', 'One row per order.', ['table_label' => 'Orders']);
+okAnswer('schema: table card saved', $tableCard);
+same('schema: table card written', true, $tableCard['saved']);
+$withCard = $api->schemaCatalog();
+same('schema: table card kept', 'One row per order.', $withCard['tables']['orders']['description'] ?? null);
 $described = $api->describeTable('orders');
 okAnswer('schema: table described', $described);
 check('schema: description printed', str_contains((string) $described['description'], 'What the customer paid'), (string) $described['description']);

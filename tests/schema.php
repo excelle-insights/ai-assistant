@@ -227,5 +227,10 @@ Config::set('schema_policy.include_own_tables', true);
 check('policy: own tables can be included', $policy2->isTableAllowed('ai_assistant_knowledge'), 'own table blocked');
 Config::set('schema_policy.include_own_tables', false);
 
+$globbed = new SchemaPolicy(['mode' => 'all', 'blocked_tables' => ['arrowchat*', '*_logs']]);
+check('policy: wildcard blocks family', !$globbed->isTableAllowed('arrowchat_messages'), 'arrowchat allowed');
+check('policy: wildcard blocks suffix', !$globbed->isTableAllowed('app_logs'), 'app_logs allowed');
+check('policy: wildcard leaves business table', $globbed->isTableAllowed('leads'), 'leads blocked');
+
 echo "{$passed} passed, {$failed} failed\n";
 exit($failed === 0 ? 0 : 1);

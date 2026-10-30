@@ -62,7 +62,9 @@ $api->handle('schema.sync');
 What it reads: `information_schema.tables`, `columns` and `key_column_usage` on the
 PDO you handed the package. It writes only tables `schema_policy` allows, so your
 `blocked_tables` and `allowed_tables` decide the catalog's scope as well as the
-query scope.
+query scope. With `mode = all` a table created after the last sync appears on the
+next one, and new columns on existing tables are added the same way. Turning on
+`schema.prune_stale` removes rows for tables or columns that no longer exist.
 
 | `options` key | Effect |
 |---------------|--------|

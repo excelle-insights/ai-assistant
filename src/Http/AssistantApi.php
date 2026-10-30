@@ -713,9 +713,10 @@ final class AssistantApi
     public function saveColumnDescription(string $table, string $column, ?string $description, array $meta = []): array
     {
         return $this->wrap(function () use ($table, $column, $description, $meta): array {
-            if (trim($table) === '' || trim($column) === '') {
-                return ['ok' => false, 'error' => 'A description needs the table and the column it belongs to.'];
+            if (trim($table) === '') {
+                return ['ok' => false, 'error' => 'A description needs the table it belongs to.'];
             }
+            // An empty column edits the table-level card in the same catalogue.
 
             return ['saved' => $this->schema()->saveDescription($table, $column, $description, $meta)];
         });
