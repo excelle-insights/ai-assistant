@@ -140,6 +140,11 @@ final class ConfigCatalog
             'label' => 'Guess blank descriptions',
             'help' => 'Fill gaps with generated guesses; replace them with real meanings for good answers.',
         ],
+        'schema.sample_rows' => [
+            'column' => 'schema_policy_json', 'type' => 'int', 'default' => 25, 'min' => 0,
+            'label' => 'Rows sampled per table',
+            'help' => 'A sync reads this many values per text column to describe date formats, encrypted columns and status values. 0 = never sample.',
+        ],
         'schema.skip_tables' => [
             'column' => 'schema_policy_json', 'type' => 'list', 'default' => [],
             'label' => 'Skip tables in the catalog',

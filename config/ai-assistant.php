@@ -138,6 +138,9 @@ return [
         // Fill blank descriptions with a generated guess. Hosts are expected to
         // replace guesses with real column meaning (docs/04).
         'auto_describe' => $bool($env(['AI_ASSISTANT_SCHEMA_AUTO_DESCRIBE']), true),
+        // Values read per text column during a sync, so descriptions can state
+        // the real date format, encryption and status values. 0 = never sample.
+        'sample_rows' => (int) $env(['AI_ASSISTANT_SCHEMA_SAMPLE_ROWS'], 25),
         // Tables the catalog ignores even in denylist mode. The package's own
         // tables are already excluded by schema_policy.include_own_tables=false.
         'skip_tables' => $csv($env(['AI_ASSISTANT_SCHEMA_SKIP_TABLES'])),

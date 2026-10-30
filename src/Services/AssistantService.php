@@ -593,7 +593,7 @@ final class AssistantService
 
         try {
             $queryPlan = $this->applyRowCap(QueryPlan::fromArray($plan), $request);
-            return [$queryPlan, $compiler->compile($queryPlan, $this->scopeFor($queryPlan, $request->user))];
+            return [$queryPlan, $this->compiled($compiler, $queryPlan, $plan, $request)];
         } catch (\Throwable $e) {
             $retry = $this->askForPlan($request, $e->getMessage());
             if ($retry === []) {
@@ -601,8 +601,23 @@ final class AssistantService
             }
             $retry = $this->preparePlanShape($retry, $request->question);
             $queryPlan = $this->applyRowCap(QueryPlan::fromArray($retry), $request);
-            return [$queryPlan, $compiler->compile($queryPlan, $this->scopeFor($queryPlan, $request->user))];
+            return [$queryPlan, $this->compiled($compiler, $queryPlan, $retry, $request)];
         }
+    }
+
+    /**
+     * Compile and keep the shaped plan beside the SQL: later steps read the
+     * plan's dimensions (a single number vs a grouping) and its labels.
+     *
+     * @param array<string,mixed> $plan
+     * @return array<string,mixed>
+     */
+    private function compiled(QueryCompiler $compiler, QueryPlan $queryPlan, array $plan, AskRequest $request): array
+    {
+        $compiled = $compiler->compile($queryPlan, $this->scopeFor($queryPlan, $request->user));
+        $compiled['plan'] = $plan;
+
+        return $compiled;
     }
 
     /**
@@ -806,6 +821,15 @@ final class AssistantService
         }
 
         if ($metrics !== []) {
+            // "How many customers?" is one number; a grouped count answers a
+            // different question than the one asked.
+            if ($dimensions !== []
+                && preg_match('/\b(how many|number of|count)\b/i', $question) === 1
+                && preg_match('/\b(per|by|each|across)\b/i', $question) === 0) {
+                $plan['dimensions'] = [];
+                unset($plan['limit'], $plan['order_by']);
+            }
+
             return $plan;
         }
 
@@ -1383,11 +1407,11 @@ final class AssistantService
     {
         $language = trim(Config::string('domain.language', ''));
         if ($language === '') {
-            return 'Reply in the language the user writes in.';
+            return 'Reply in the language the user writes in — an English question gets an English answer.';
         }
 
         return Config::bool('domain.multilingual', true)
-            ? 'Reply in ' . $language . " unless the question is written in another language, then use that one."
+            ? 'Reply in ' . $language . " unless the question is written in another language, then use that one. An English question gets an English answer."
             : 'Always reply in ' . $language . ', whatever language the question is written in.';
     }
 
@@ -1446,24 +1470,123 @@ final class AssistantService
      */
     private function describeRows(AskRequest $request, QueryResult $result, array $compiled): string
     {
+        // A single aggregate has exactly one right sentence, and a model that
+        // restates the number can get it wrong. Say it from the row instead.
+        $single = self::singleAggregateSentence($result, $compiled, $this->pack);
+        if ($single !== '') {
+            return $single;
+        }
+
         $period = (string) ($compiled['applied_filters']['period'] ?? '');
         $dataset = (string) ($compiled['dataset'] ?? '');
         $messages = $this->convo(
             $this->groundedPrompt('the query result', $result->asPromptText(), $request)
-            . "\nSay the figure in one or two sentences, mentioning "
-            . ($period !== '' ? 'the period (' . $period . ')' : 'the period the user asked for')
-            . ' and the unit when a column name implies money. Do not repeat the table: the client renders it.',
+            . "\nThe table below is the complete answer and is already shown to the user: summarise it in one or two sentences"
+            . ($period !== '' ? ', naming the period (' . $period . ')' : '')
+            . '. Use the column labels, and money with the unit their label implies. Never say the information is missing,'
+            . ' incomplete or unavailable, and never apologise, when the table has rows.',
             $request->question,
             []
         );
         $reply = trim((string) ($this->chat($messages)['content'] ?? ''));
-        if ($reply !== '') {
+        if ($reply !== '' && self::numbersAreSourced($reply, $result, $compiled)) {
             return $reply;
         }
 
-        $fallback = $dataset !== '' ? 'From ' . $dataset . ($period !== '' ? ' (' . $period . ')' : '') . ': ' : '';
+        $label = '';
+        $entry = $dataset !== '' ? $this->pack?->dataset($dataset) : null;
+        if ($entry !== null) {
+            $label = trim((string) ($entry['label'] ?? '')) !== '' ? (string) $entry['label'] : $dataset;
+        } elseif ($dataset !== '') {
+            $label = $dataset;
+        }
 
-        return $fallback . $result->asPromptText(12);
+        return 'Showing ' . $result->count() . ($label !== '' ? ' ' . strtolower($label) : ' records')
+            . ($period !== '' ? ' (' . $period . ')' : '') . '.';
+    }
+
+    /**
+     * Every figure in a written summary must already be in the table it
+     * describes; a number the model produced on its own is a reason to drop the
+     * prose and let the rows speak.
+     *
+     * @param array<string,mixed> $compiled
+     */
+    private static function numbersAreSourced(string $reply, QueryResult $result, array $compiled): bool
+    {
+        if (preg_match_all('/\d[\d,]*(?:\.\d+)?/', $reply, $matches) === 0) {
+            return true;
+        }
+        $haystack = $result->asPromptText(200);
+        foreach ((array) ($compiled['applied_filters'] ?? []) as $value) {
+            if (is_scalar($value)) {
+                $haystack .= ' ' . (string) $value;
+            }
+        }
+        $digits = (string) preg_replace('/[^0-9]/', '', $haystack);
+        foreach ($matches[0] as $token) {
+            $number = (string) preg_replace('/[^0-9]/', '', (string) $token);
+            // One- and two-digit numbers are prose ("3 of these", a share),
+            // not a restatement of a figure.
+            if ($number === '' || strlen($number) <= 2 || str_contains($digits, $number)) {
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * "Total collections this year" is one row of one number: naming it is not a
+     * writing task. The sentence is built from the plan's own labels, so the
+     * figure in the words is always the figure in the table.
+     *
+     * @param array<string,mixed> $compiled
+     */
+    private static function singleAggregateSentence(QueryResult $result, array $compiled, ?DomainPack $pack): string
+    {
+        if (($compiled['aggregate'] ?? false) !== true || count($result->rows) !== 1) {
+            return '';
+        }
+        $plan = (array) ($compiled['plan'] ?? []);
+        if ((array) ($plan['dimensions'] ?? []) !== []) {
+            return '';
+        }
+        $dataset = (string) ($compiled['dataset'] ?? '');
+        $period = (string) ($compiled['applied_filters']['period'] ?? '');
+        $entry = $dataset !== '' ? $pack?->dataset($dataset) : null;
+        $datasetLabel = $entry !== null ? trim((string) ($entry['label'] ?? '')) : '';
+        $single = count((array) $result->rows[0]) === 1;
+        $parts = [];
+        foreach ((array) $result->rows[0] as $column => $value) {
+            if ($value === null) {
+                continue;
+            }
+            $metric = $pack?->metric($dataset, (string) $column);
+            $label = trim((string) ($metric['label'] ?? ''));
+            if ($single && ($metric['function'] ?? '') === 'count' && $datasetLabel !== '') {
+                $label = $datasetLabel;
+            }
+            $parts[] = ($label !== '' ? $label : (string) $column) . ': '
+                . self::displayNumber($value, (string) ($metric['format'] ?? ''))
+                . ($period !== '' ? ' (' . $period . ')' : '');
+        }
+
+        return $parts === [] ? '' : implode('; ', $parts) . '.';
+    }
+
+    private static function displayNumber(mixed $value, string $format): string
+    {
+        if (!is_numeric($value)) {
+            return is_scalar($value) ? (string) $value : (string) json_encode($value);
+        }
+        $number = (float) $value;
+        $text = number_format($number, $format === 'money' && floor($number) !== $number ? 2 : 0);
+        $currency = trim(Config::string('domain.currency', ''));
+
+        return $format === 'money' && $currency !== '' ? $currency . ' ' . $text : $text;
     }
 
     /** @param array<string,mixed> $compiled @return Citation[] */
@@ -1502,7 +1625,7 @@ final class AssistantService
      * latest month that does have records, so a zero is not a dead end.
      *
      * @param array<string,mixed> $compiled
-     * @return array{dataset:string,month:string,metric:string,value:string}|array{}
+     * @return array{dataset?:string,month?:string,metric?:string,value?:string,empty?:bool}|array{}
      */
     private function latestPeriod(array $compiled, UserContext $user): array
     {
@@ -1541,7 +1664,8 @@ final class AssistantService
         $row = is_array($probeRows[0] ?? null) ? array_values($probeRows[0]) : [];
         $month = (string) ($row[0] ?? '');
         if ($month === '') {
-            return [];
+            // The probe ran and found no month at all: the dataset is empty.
+            return ['empty' => true, 'dataset' => (string) ($dataset['label'] ?? $datasetName)];
         }
         $value = $row[1] ?? null;
 
@@ -1578,9 +1702,11 @@ final class AssistantService
         array $latest = []
     ): Answer {
         $scope = self::filterSentence($appliedFilters);
-        $hasZeroRow = $result !== null && !$result->isEmpty();
+        $hasZeroRow = $result !== null && !$result->isEmpty() && self::hasAnyNumber((array) $result->rows[0]);
         $hint = '';
-        if ($latest !== []) {
+        if (!empty($latest['empty'])) {
+            $hint = ' Nothing has been recorded in ' . strtolower((string) $latest['dataset']) . ' yet.';
+        } elseif ($latest !== []) {
             $hint = ' The most recent ' . strtolower((string) $latest['dataset'])
                 . ' in AMS are from ' . $latest['month']
                 . ' (' . $latest['metric'] . ': ' . $latest['value'] . ')'
@@ -1589,7 +1715,7 @@ final class AssistantService
 
         return new Answer(
             text: 'No matching records' . ($scope !== '' ? ' ' . $scope : '') . '.' . $hint
-                . ' Try a wider period or a different filter.',
+                . (empty($latest['empty']) ? ' Try a wider period or a different filter.' : ''),
             intent: 'data',
             rows: $hasZeroRow ? $result->rows : [],
             citations: $hasZeroRow ? $this->dataCitations($compiled, $result) : [],
@@ -1599,13 +1725,31 @@ final class AssistantService
         );
     }
 
-    /** A single aggregate row whose every measure is zero means an empty scope. */
+    /** An all-NULL aggregate row (SUM over no rows) is not evidence worth showing. */
+    private static function hasAnyNumber(array $row): bool
+    {
+        foreach ($row as $value) {
+            if (is_numeric($value)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * A single aggregate row whose every measure is zero or NULL means an empty
+     * scope: SUM/MAX/MIN over no rows come back as NULL, not 0.
+     */
     private static function isZeroAggregate(QueryResult $result, array $compiled): bool
     {
         if (($compiled['aggregate'] ?? false) !== true || count($result->rows) !== 1) {
             return false;
         }
         foreach ((array) ($result->rows[0] ?? []) as $value) {
+            if ($value === null) {
+                continue;
+            }
             if (!is_numeric($value) || (float) $value !== 0.0) {
                 return false;
             }

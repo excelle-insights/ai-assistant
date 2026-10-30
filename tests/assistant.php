@@ -231,6 +231,7 @@ final class FakeActions implements ActionHandlerInterface
 // ─── the "host database": one table, two tenants ──────────────────────────────
 $pdo = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $pdo->exec('CREATE TABLE orders (id INTEGER PRIMARY KEY, company_id INTEGER, customer_id INTEGER, status TEXT, total_amount NUMERIC, created_at TEXT)');
+$pdo->exec('CREATE TABLE empty_log (id INTEGER PRIMARY KEY, company_id INTEGER, day TEXT)');
 foreach ([
     [1, 7, 42, 'new', 100, '2026-10-01 09:00:00'],
     [2, 7, 42, 'done', 200, '2026-10-02 09:00:00'],
@@ -316,7 +317,7 @@ same('data: stored turns are user then assistant', ['user', 'assistant'], array_
 same('data: one audit event', 'assistant.answered', $audit[0]['action'] ?? '');
 same('data: audit carries the row count', 1, $audit[0]['rows'] ?? 0);
 check('data: usage recorded', $usage !== [] && ($usage[0]['prompt_tokens'] ?? 0) === 40, json_encode($usage));
-same('data: two llm calls (route + describe)', 2, $llm->calls);
+same('data: one number answered without a second model call', 1, $llm->calls);
 
 // ─── the host's own row ceiling reaches the compiled query ───────────────────
 $dataPlan = new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records']]]);
@@ -364,6 +365,31 @@ $listed = (new AssistantService(
 check('shape: a list question drops the count', !in_array('records', array_keys((array) ($listed->rows[0] ?? [])), true), json_encode(array_keys((array) ($listed->rows[0] ?? []))));
 same('shape: the list keeps one row per record', 3, count($listed->rows));
 
+$badFigure = (new AssistantService(
+    llm: new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records'], 'dimensions' => ['name']]], 'Revenue was 999999 in total.'),
+    pack: $namePack,
+    compiler: new QueryCompiler($namePack, new SchemaPolicy(), $tableColumns),
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('all orders', $user);
+same('narration: an unsourced figure is dropped', 'Showing 3 orders.', $badFigure->text);
+
+$counted = (new AssistantService(
+    llm: new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records'], 'dimensions' => ['name']]]),
+    pack: $namePack,
+    compiler: new QueryCompiler($namePack, new SchemaPolicy(), $tableColumns),
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('how many orders do we have?', $user);
+same('shape: "how many" is one number, not a grouping', 1, count($counted->rows));
+same('shape: "how many" reads the value from the row', 'Orders: 3.', $counted->text);
+
+$grouped = (new AssistantService(
+    llm: new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records'], 'dimensions' => ['name']]]),
+    pack: $namePack,
+    compiler: new QueryCompiler($namePack, new SchemaPolicy(), $tableColumns),
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('how many orders per status?', $user);
+same('shape: "per" keeps the grouping', 2, count($grouped->rows));
+
 // ─── scope the model never sees ───────────────────────────────────────────────
 $perms = new ScopedPermissions('customer_id = 42');
 $scoped = service(new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records']]]), [], new ArrayStore(), $perms);
@@ -395,6 +421,49 @@ $none = service(new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'or
 check('empty: says no records rather than inventing one', !preg_match('/\b[1-9]\d*\b/', $none->text), $none->text);
 same('empty: a zero count stays visible as the evidence', 0, (int) first_value($none->rows));
 check('empty: the query is still cited', $none->citations !== [] && $none->citations[0]->type === 'query', json_encode($none->sources()));
+
+// SUM over no rows is NULL; that is "nothing matched", not a value to report.
+$sumPack = new DomainPack([[
+    'name' => 'x',
+    'datasets' => [[
+        'name' => 'orders', 'table' => 'orders', 'date_field' => 'created_at', 'tenant_scoped' => true,
+        'metrics' => [['name' => 'revenue', 'label' => 'Revenue', 'function' => 'sum', 'column' => 'orders.total_amount']],
+        'dimensions' => [['name' => 'status', 'label' => 'Status', 'column' => 'orders.status']],
+    ]],
+]], [], ['auto_derive' => false]);
+$summed = (new AssistantService(
+    llm: new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['revenue'], 'filters' => [['field' => 'status', 'operator' => '=', 'value' => 'missing']]]]),
+    pack: $sumPack,
+    compiler: new QueryCompiler($sumPack, new SchemaPolicy(), $tableColumns),
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('what did we earn on missing orders?', $user);
+check('empty: a NULL sum is reported as no records', str_contains($summed->text, 'No matching records'), $summed->text);
+same('empty: a NULL sum keeps no row', [], $summed->rows);
+
+$revenue = (new AssistantService(
+    llm: new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['revenue']]]),
+    pack: $sumPack,
+    compiler: new QueryCompiler($sumPack, new SchemaPolicy(), $tableColumns),
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('what is our revenue?', $user);
+same('single number: the sentence is built from the row', 'Revenue: 600.', $revenue->text);
+
+// An empty table says so, instead of hinting at a later period that never comes.
+$emptyPack = new DomainPack([[
+    'name' => 'x',
+    'datasets' => [[
+        'name' => 'logs', 'table' => 'empty_log', 'date_field' => 'day', 'tenant_scoped' => true,
+        'metrics' => [['name' => 'logs', 'label' => 'Log entries', 'function' => 'count', 'column' => 'empty_log.id']],
+        'dimensions' => [['name' => 'month', 'label' => 'Month', 'column' => 'empty_log.day', 'format' => 'date']],
+    ]],
+]], [], ['auto_derive' => false]);
+$nothingYet = (new AssistantService(
+    llm: new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'logs', 'metrics' => ['logs']]]),
+    pack: $emptyPack,
+    compiler: new QueryCompiler($emptyPack, new SchemaPolicy(), ['empty_log' => ['id', 'company_id', 'day']]),
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('how many log entries?', $user);
+check('empty: an empty table says nothing is recorded', str_contains($nothingYet->text, 'Nothing has been recorded'), $nothingYet->text);
 
 $noExecutor = new AssistantService(
     llm: new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records']]]),

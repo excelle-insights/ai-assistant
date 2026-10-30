@@ -294,6 +294,29 @@ $decrypted = (new QueryCompiler($decryptor, new SchemaPolicy(), $tableColumns))
     ->compile(QueryPlan::fromArray(['dataset' => 'orders', 'dimensions' => ['customer']]), $scoped);
 check('expression: decrypt helper and a session variable are allowed', str_contains($decrypted['sql'], 'AES_DECRYPT') && str_contains($decrypted['sql'], '@host_key'), $decrypted['sql']);
 
+// The catalog hides blocked columns, but a host expression may still read them.
+$slimColumns = ['orders' => ['id', 'status']];
+$slimPack = new DomainPack([[
+    'name' => 'x',
+    'datasets' => [[
+        'name' => 'orders', 'table' => 'orders',
+        'dimensions' => [['name' => 'secret', 'expr' => "COALESCE(AES_DECRYPT(FROM_BASE64(orders.total_amount), @host_key), orders.total_amount)"]],
+    ]],
+]], $catalog, ['auto_derive' => false]);
+$slim = (new QueryCompiler($slimPack, new SchemaPolicy(), $slimColumns))
+    ->compile(QueryPlan::fromArray(['dataset' => 'orders', 'dimensions' => ['secret']]), $scoped);
+check('expression: a qualified column the catalog hides is trusted', str_contains($slim['sql'], 'orders.total_amount'), $slim['sql']);
+
+$unknownTable = new DomainPack([[
+    'name' => 'x',
+    'datasets' => [[
+        'name' => 'orders', 'table' => 'orders',
+        'dimensions' => [['name' => 'bad', 'expr' => 'nope.total_amount']],
+    ]],
+]], $catalog, ['auto_derive' => false]);
+throws('expression: an unknown qualifier is still refused', fn () => (new QueryCompiler($unknownTable, new SchemaPolicy(), $slimColumns))
+    ->compile(QueryPlan::fromArray(['dataset' => 'orders', 'dimensions' => ['bad']]), $scoped), 'unknown table');
+
 $joinedPack = new DomainPack([[
     'name' => 'x',
     'datasets' => [[
