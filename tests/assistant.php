@@ -346,6 +346,24 @@ $asked = service(new ScriptedLlm(['intent' => 'data', 'plan' => [
 ]]))->ask('orders from the last 7 days', $user);
 same('period: a range the question names is kept', 0, (int) first_value($asked->rows));
 
+// ─── "all users" is a record list, not a count per category ───────────────────
+$namePack = new DomainPack([[
+    'name' => 'x',
+    'datasets' => [[
+        'name' => 'orders', 'table' => 'orders', 'date_field' => 'created_at', 'tenant_scoped' => true,
+        'metrics' => [['name' => 'records', 'label' => 'Records', 'function' => 'count', 'column' => 'orders.id']],
+        'dimensions' => [['name' => 'name', 'label' => 'Order name', 'column' => 'orders.status']],
+    ]],
+]], [], ['auto_derive' => false]);
+$listed = (new AssistantService(
+    llm: new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records'], 'dimensions' => ['name']]]),
+    pack: $namePack,
+    compiler: new QueryCompiler($namePack, new SchemaPolicy(), $tableColumns),
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('all orders', $user);
+check('shape: a list question drops the count', !in_array('records', array_keys((array) ($listed->rows[0] ?? [])), true), json_encode(array_keys((array) ($listed->rows[0] ?? []))));
+same('shape: the list keeps one row per record', 3, count($listed->rows));
+
 // ─── scope the model never sees ───────────────────────────────────────────────
 $perms = new ScopedPermissions('customer_id = 42');
 $scoped = service(new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records']]]), [], new ArrayStore(), $perms);
