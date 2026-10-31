@@ -29,6 +29,14 @@ use ExcelleInsights\AiAssistant\Services\SchemaService;
  * or hands the same shape to DomainPack::load() / Config::load(), or points at a
  * JSON file with AI_ASSISTANT_SEMANTIC_PACK.
  *
+ * A dimension whose relation is on the many side (one unit, two buyers) says so,
+ * and the far side is folded into one value instead of multiplying the rows it is
+ * read with:
+ *
+ *   'dimensions' => [['name' => 'client_name', 'collect' => 'group_concat',
+ *                     'separator' => ' & ', 'expr' => 'clients.name',
+ *                     'via' => ['unit_clients', 'clients']]],
+ *
  * Anything a host does not declare is derived from the schema catalog the
  * operator has already described, so the assistant works on a new application
  * with zero pack authoring — just less precisely. Pack definitions always win
@@ -1043,6 +1051,13 @@ final class DomainPack
             'expr' => trim((string) ($raw['expr'] ?? '')),
             'format' => strtolower(trim((string) ($raw['format'] ?? 'text'))),
             'via' => self::viaList($raw['via'] ?? ''),
+            // A dimension on the many side of a relation. The far side is
+            // folded into one value instead of multiplying the rows it is read
+            // with.
+            'collect' => self::collectMode($raw['collect'] ?? ''),
+            // The spacing around a separator is part of it: " & " reads better
+            // than "&" between two names.
+            'separator' => (string) ($raw['separator'] ?? ''),
             'aliases' => self::aliasList($raw['aliases'] ?? null, $name),
             'description' => trim((string) ($raw['description'] ?? '')),
         ];
@@ -1140,6 +1155,21 @@ final class DomainPack
             }
         }
         return array_values(array_unique($out));
+    }
+
+    /**
+     * How a many-side value is folded into one field.
+     *
+     * Only the grouping of names is supported: a receipt whose unit has two
+     * buyers shows both names in one cell, not two receipts.
+     */
+    private static function collectMode(mixed $collect): string
+    {
+        if ($collect === true) {
+            return 'group_concat';
+        }
+        $mode = strtolower(trim((string) $collect));
+        return $mode === 'group_concat' ? $mode : '';
     }
 
     /** @param array<int,array<string,mixed>> $columns @return string */
