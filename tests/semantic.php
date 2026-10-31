@@ -486,6 +486,66 @@ $unsafeSeparator = new DomainPack([[
 throws('collect: an unsafe separator is refused', fn () => (new QueryCompiler($unsafeSeparator, new SchemaPolicy(), $manyColumns))
     ->compile(QueryPlan::fromArray(['dataset' => 'receipts', 'dimensions' => ['client_name']]), []), 'Unsafe separator');
 
+// ─── A dimension that holds a set of codes ────────────────────────────────────
+// Every CRM stores a state as a code ("2") while the person asks for "sold".
+// The pack declares the set, the router sees the words, the compiler binds the
+// code, and a word that is not in the set cannot silently return nothing.
+$valuePack = new DomainPack([[
+    'name' => 'x',
+    'datasets' => [[
+        'name' => 'units', 'table' => 'units',
+        'metrics' => [['name' => 'units', 'function' => 'count', 'column' => 'units.id']],
+        'dimensions' => [
+            ['name' => 'state', 'column' => 'units.state', 'values' => ['open' => '1', 'sold' => '2', 'blocked' => '5']],
+            ['name' => 'pay_state', 'column' => 'units.pay_state', 'values' => ['PAID', 'NOTPAID']],
+            ['name' => 'area', 'column' => 'units.area'],
+        ],
+    ]],
+]], $catalog, ['auto_derive' => false]);
+$valueCompiler = new QueryCompiler($valuePack, new SchemaPolicy(), ['units' => ['id', 'state', 'pay_state', 'area']]);
+
+$sold = $valueCompiler->compile(QueryPlan::fromArray([
+    'dataset' => 'units',
+    'metrics' => ['units'],
+    'filters' => [['field' => 'state', 'operator' => '=', 'value' => 'SOLD']],
+]), []);
+same('values: the word is bound as the code the column holds', '2', (string) ($sold['bind'][':f0'] ?? ''), json_encode($sold['bind']));
+check('values: the filter still reads the plain column', str_contains($sold['sql'], '`units`.`state` = :f0'), $sold['sql']);
+
+$spacing = $valueCompiler->compile(QueryPlan::fromArray([
+    'dataset' => 'units',
+    'filters' => [['field' => 'pay_state', 'operator' => '=', 'value' => 'Not Paid']],
+]), []);
+same('values: spacing and case are ignored', 'NOTPAID', (string) ($spacing['bind'][':f0'] ?? ''), json_encode($spacing['bind']));
+
+$code = $valueCompiler->compile(QueryPlan::fromArray([
+    'dataset' => 'units',
+    'filters' => [['field' => 'state', 'operator' => '=', 'value' => '5']],
+]), []);
+same('values: a code asked for directly still works', '5', (string) ($code['bind'][':f0'] ?? ''), json_encode($code['bind']));
+
+$unknown = $valueCompiler->compile(QueryPlan::fromArray([
+    'dataset' => 'units',
+    'filters' => [['field' => 'state', 'operator' => '=', 'value' => 'mortgage']],
+]), []);
+same('values: a word outside the set is not rewritten', 'mortgage', (string) ($unknown['bind'][':f0'] ?? ''), json_encode($unknown['bind']));
+
+$many = $valueCompiler->compile(QueryPlan::fromArray([
+    'dataset' => 'units',
+    'filters' => [['field' => 'state', 'operator' => 'in', 'value' => ['sold', 'blocked']]],
+]), []);
+same('values: every item in a list is mapped', '2,5', implode(',', [$many['bind'][':f0_0'] ?? '', $many['bind'][':f0_1'] ?? '']), json_encode($many['bind']));
+
+$untouched = $valueCompiler->compile(QueryPlan::fromArray([
+    'dataset' => 'units',
+    'filters' => [['field' => 'area', 'operator' => '=', 'value' => 'SOLD']],
+]), []);
+same('values: a dimension with no set keeps the question\'s word', 'SOLD', (string) ($untouched['bind'][':f0'] ?? ''), json_encode($untouched['bind']));
+
+check('values: the vocabulary shows the words a code column holds', str_contains($valuePack->vocabulary(), 'state{open|sold|blocked}'), $valuePack->vocabulary());
+check('values: a plain list shows its own values', str_contains($valuePack->vocabulary(), 'pay_state{PAID|NOTPAID}'), $valuePack->vocabulary());
+check('values: a dimension without a set shows no braces', !str_contains($valuePack->vocabulary(), 'area{'), $valuePack->vocabulary());
+
 Config::reset();
 echo "{$passed} passed, {$failed} failed\n";
 exit($failed === 0 ? 0 : 1);

@@ -1006,7 +1006,7 @@ final class QueryCompiler
                 $params = [];
                 foreach ($items as $position => $item) {
                     $name = $param . '_' . $position;
-                    $bind[$name] = $item;
+                    $bind[$name] = $this->storedValue($dimension, $item);
                     $params[] = $name;
                 }
                 $out[] = $column . ($operator === 'in' ? ' IN (' : ' NOT IN (') . implode(', ', $params) . ')';
@@ -1023,10 +1023,22 @@ final class QueryCompiler
             if (!in_array($operator, ['=', '!=', '>', '>=', '<', '<='], true)) {
                 throw new \InvalidArgumentException('Unsupported filter operator "' . $operator . '" on "' . $field . '".');
             }
-            $bind[$param] = $value;
+            $bind[$param] = $this->storedValue($dimension, $value);
             $out[] = $column . ' ' . $operator . ' ' . $param;
         }
         return $out;
+    }
+
+    /**
+     * The value the column actually holds. A CRM code column stores "2" while
+     * the question says "sold"; the dimension's value set is what joins the two.
+     *
+     * @param array<string,mixed> $dimension
+     */
+    private function storedValue(array $dimension, mixed $value): mixed
+    {
+        $stored = DomainPack::matchValue($dimension, $value);
+        return $stored ?? $value;
     }
 
     /**

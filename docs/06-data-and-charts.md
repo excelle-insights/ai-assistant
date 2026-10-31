@@ -179,6 +179,31 @@ reads "Albert Ouma Wanga & JUDITH OMBUOR". `collect` accepts `group_concat` (or
 `true`); the separator is plain text only, and it is rejected if it carries
 anything else.
 
+### A dimension that holds codes
+
+Some columns store a code, not a word: `hs_state = '2'` means sold, `pay_state`
+holds only `PAID` or `NOTPAID`. The user says "sold" and "overdue", so a filter
+built from their words never matches. Declare the set and the two vocabularies
+meet in the middle:
+
+```php
+'dimensions' => [[
+    'name'   => 'state',
+    'expr'   => 'listing_info.hs_state',
+    'values' => ['open' => '1', 'sold' => '2', 'blocked' => '5'],
+]],
+```
+
+The router now sees `state{open|sold|blocked}` and is told to filter a braced
+dimension with one of those words only — an invented value ("overdue") is a
+measure, not a filter. The compiler maps the word back to the stored code when
+binding `=`, `!=`, `in` and `not_in`, matching on label or code and ignoring
+case, spacing and punctuation ("Not Paid" binds the same value as "notpaid"). A
+value the set does not mention is passed through untouched rather than silently
+rewritten, and `like`/`contains` are never mapped because partial text is the
+user's own words. Codes without labels work too: `'PAID', 'NOTPAID'` binds
+exactly what it says.
+
 ## Analysis you can ask for
 
 All of these are the same mechanism, and they work because your pack (or the derived

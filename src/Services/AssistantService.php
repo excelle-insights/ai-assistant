@@ -803,6 +803,7 @@ final class AssistantService
                 . '"order_by":[{"field":"name","direction":"desc"}],"limit":20,"chart":"bar|line|area|pie|scatter|kpi|""}',
                 'Rules:',
                 '- Use only names that appear in the vocabulary. Never invent a column, table or SQL.',
+                '- A dimension written as name{a|b|c} holds only those values. Filter it with one of the words inside the braces — never a word of your own. If the question asks for something the list does not contain ("overdue" when the states are only PAID and NOTPAID), use a measure instead of a filter.',
                 '- Anything countable is intent "data": a number must come from a query, never from memory.',
                 '- A dataset name on its own is still "data" — "all listings", "show projects", "users", "tasks" must return rows, not help text.',
                 '- "All users", "all leads" and "list clients" ask for records: use the identity dimension (name, or title/unit when the dataset has one) and no measure, so each record is identified. Group by categories only when the question says "by ..." or asks how many.',
