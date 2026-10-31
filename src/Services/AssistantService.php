@@ -53,7 +53,7 @@ use ExcelleInsights\AiAssistant\Support\SchemaPolicy;
 final class AssistantService
 {
     /** Intents the router may choose. */
-    public const INTENTS = ['data', 'knowledge', 'document', 'action', 'report', 'help', 'smalltalk'];
+    public const INTENTS = ['data', 'knowledge', 'document', 'action', 'report', 'help', 'smalltalk', 'clarify'];
 
     /** The parts of a date a question can group by. */
     private const PERIOD_NAMES = ['month', 'year', 'quarter', 'week', 'day', 'monthly', 'yearly', 'quarterly', 'weekly', 'daily'];
@@ -61,7 +61,22 @@ final class AssistantService
     /** Typoes that must not change what a question means. */
     private const MISSPELLINGS = [
         'inlude' => 'include', 'inlcude' => 'include', 'inclue' => 'include', 'inculde' => 'include',
+        'includ' => 'include', 'inculdes' => 'includes', 'incude' => 'include',
         'adress' => 'address', 'emial' => 'email', 'phoen' => 'phone', 'contct' => 'contact',
+        'quite' => 'quiet', 'amiunth' => 'amount', 'ammount' => 'amount', 'recieved' => 'received',
+        'infomration' => 'information', 'infromation' => 'information', 'infomation' => 'information',
+    ];
+
+    /**
+     * Words that ask for "the report" without saying which one.
+     *
+     * A question built from one of these names no dataset of its own, so
+     * nothing can be answered until the user picks a subject.
+     */
+    private const VAGUE_SUBJECTS = [
+        'report', 'reports', 'summary', 'summaries', 'digest', 'overview', 'breakdown',
+        'numbers', 'figures', 'performance', 'commissions', 'allocation', 'reminders',
+        'insights', 'statistics', 'dashboard',
     ];
 
     private LlmClientInterface $llm;
@@ -160,6 +175,7 @@ final class AssistantService
             'action' => $this->answerWithAction($request),
             'report' => $this->answerWithReport($request, (array) $decision['plan']),
             'help' => $this->answerHelp($request),
+            'clarify' => $this->answerClarify($request, (array) $decision['plan']),
             default => $this->answerSmalltalk($request, $history),
         };
 
@@ -282,6 +298,34 @@ final class AssistantService
         if ($intent === 'data' && $plan === [] && $previous !== null && $this->continuesPreviousAnswer($request->question)) {
             return ['intent' => 'data', 'plan' => $this->asContinuation($previous), 'by' => 'follow_up'];
         }
+        // A question that only names fields is a record list, not a request for
+        // help. The router has nothing to run, but the fields the user named
+        // are enough to build the query.
+        if (($intent === 'help' || $intent === 'knowledge') && $plan === []) {
+            $fields = $this->fieldOnlyPlan($request->question);
+            if ($fields !== null) {
+                return ['intent' => 'data', 'plan' => $fields, 'by' => 'fields'];
+            }
+        }
+        // A question too vague to answer is answered with a question.
+        $clarify = $this->clarifyFor($request->question, $intent);
+        if ($clarify !== null) {
+            return ['intent' => 'clarify', 'plan' => $clarify, 'by' => 'clarify'];
+        }
+        // A screen this CRM already has: "the collections report" is the numbers
+        // behind that screen, not a stored report to pick from. A question that
+        // only names the subject ("how many leads") keeps the router's plan —
+        // the screen is not what was asked for.
+        $match = $this->packReportMatch($request);
+        if ($match['report'] !== null) {
+            $namesScreen = str_contains($match['phrase'], 'report') || str_contains($match['phrase'], 'screen');
+            if ($intent !== 'data' || $namesScreen) {
+                $screen = $this->planForPackReport($match['report'], $request);
+                if ($screen !== []) {
+                    return ['intent' => 'data', 'plan' => $screen, 'by' => 'pack_report'];
+                }
+            }
+        }
         if (in_array($intent, self::INTENTS, true)) {
             return ['intent' => $intent, 'plan' => $plan, 'by' => 'router'];
         }
@@ -302,6 +346,9 @@ final class AssistantService
     private function asContinuation(array $plan): array
     {
         $plan['continued'] = true;
+        // A follow-up asks for more than the screen shows, so the question is
+        // allowed to shape the answer again.
+        unset($plan['fixed']);
 
         return $plan;
     }
@@ -389,6 +436,291 @@ final class AssistantService
         return false;
     }
 
+    /**
+     * A question that only names fields.
+     *
+     * "Lead name, email, phone, etc" says what to show and nothing to count.
+     * The router cannot answer it with a query, so it falls back to a
+     * capability list; the fields it named are enough to build one.
+     *
+     * @return array<string,mixed>|null
+     */
+    private function fieldOnlyPlan(string $question): ?array
+    {
+        if ($this->pack === null) {
+            return null;
+        }
+        $text = $this->questionWords($question);
+        if (preg_match('/\b(how many|how much|totals?|sums?|averages?|avg|counts?|number of|percentage|compare|chart|graph|trend|breakdown|rank|ranking)\b/', $text) === 1) {
+            return null;
+        }
+        foreach ($this->pack->listDatasets() as $dataset) {
+            if (!$this->namesDataset($text, $dataset)) {
+                continue;
+            }
+            $fields = $this->fieldsNamed($text, $dataset);
+            if ($fields === []) {
+                continue;
+            }
+            $identity = $this->identityDimension($dataset);
+            $dimensions = $identity !== '' && !in_array($identity, $fields, true)
+                ? array_merge([$identity], $fields)
+                : $fields;
+
+            return [
+                'dataset' => (string) ($dataset['name'] ?? ''),
+                'dimensions' => $dimensions,
+                'metrics' => [],
+                'filters' => [],
+                'limit' => 20,
+            ];
+        }
+
+        return null;
+    }
+
+    /**
+     * A question too vague to answer, and the options that would answer it.
+     *
+     * "Give me the report" names a subject this CRM has many of. Guessing one
+     * wastes the turn; asking which one is what a colleague would do.
+     *
+     * @return array<string,mixed>|null
+     */
+    private function clarifyFor(string $question, string $intent): ?array
+    {
+        if (!in_array($intent, ['help', 'knowledge'], true)) {
+            return null;
+        }
+        $text = $this->questionWords($question);
+        if (preg_match('/\b(what can you|how do you use|how do i use|help me use|capabilities|commands?|who are you|what are you|help)\b/', $text) === 1) {
+            return null;
+        }
+        if ($this->namesItsOwnSubject($text)) {
+            return null;
+        }
+        $vague = false;
+        foreach (self::VAGUE_SUBJECTS as $subject) {
+            if (str_contains($text, ' ' . $subject . ' ') || str_contains($text, ' ' . $subject . 's ')) {
+                $vague = true;
+                break;
+            }
+        }
+        if (!$vague) {
+            return null;
+        }
+        $options = $this->clarifyOptions($text);
+        if ($options === []) {
+            return null;
+        }
+
+        return ['options' => $options, 'question' => trim($question)];
+    }
+
+    /**
+     * The subjects a vague question could mean, best match first.
+     *
+     * @return string[]
+     */
+    private function clarifyOptions(string $text): array
+    {
+        $reports = $this->packReports();
+        $scored = [];
+        foreach ($reports as $report) {
+            $label = trim((string) ($report['label'] ?? '')) ?: trim((string) ($report['name'] ?? ''));
+            if ($label === '') {
+                continue;
+            }
+            $score = 0;
+            foreach (preg_split('/\W+/', strtolower($label . ' ' . (string) ($report['description'] ?? ''))) ?: [] as $word) {
+                if (strlen($word) >= 4 && str_contains($text, ' ' . $word . ' ')) {
+                    $score++;
+                }
+            }
+            $scored[] = ['label' => $label, 'score' => $score];
+        }
+        usort($scored, static fn (array $a, array $b): int => $b['score'] <=> $a['score']);
+        $options = array_map(static fn (array $entry): string => (string) $entry['label'], $scored);
+        if ($options === [] && $this->pack !== null) {
+            foreach ($this->pack->listDatasets() as $dataset) {
+                $label = trim((string) ($dataset['label'] ?? ''));
+                if ($label !== '') {
+                    $options[] = $label;
+                }
+            }
+        }
+
+        return array_values(array_unique(array_slice($options, 0, 6)));
+    }
+
+    /** The reports this CRM already has, as the pack declares them. */
+    private function packReports(): array
+    {
+        return $this->pack?->reports() ?? [];
+    }
+
+    /**
+     * Ask instead of guessing.
+     *
+     * @param array<string,mixed> $plan
+     */
+    private function answerClarify(AskRequest $request, array $plan): Answer
+    {
+        $options = array_values(array_map('strval', (array) ($plan['options'] ?? [])));
+        if ($options === []) {
+            $options = $this->clarifyOptions($this->questionWords($request->question));
+        }
+        $text = $options === []
+            ? 'Tell me a little more and I will answer it.'
+            : 'To answer that, which one do you mean?';
+
+        return new Answer(
+            text: $text,
+            intent: 'clarify',
+            grounded: true,
+            suggestions: array_slice($options, 0, 6),
+            meta: ['clarified_question' => trim((string) ($plan['question'] ?? ''))]
+        );
+    }
+
+    /**
+     * The words of a question, with the typos that must not change its meaning
+     * already repaired.
+     */
+    private function questionWords(string $question): string
+    {
+        $text = ' ' . trim((string) preg_replace('/[^a-z0-9_ ]+/u', ' ', strtolower($question)), ' ') . ' ';
+
+        return ' ' . trim(strtr($text, self::MISSPELLINGS)) . ' ';
+    }
+
+    /**
+     * A phrase reduced to the words a question uses.
+     */
+    private function normalisePhrase(string $phrase): string
+    {
+        // Lower case first: a capital letter is not part of the word and
+        // stripping it would turn "Lead phone" into "ead phone".
+        $lower = strtolower(str_replace('_', ' ', $phrase));
+
+        return trim((string) preg_replace('/[^a-z0-9_ ]+/u', ' ', $lower));
+    }
+
+    /**
+     * The longest phrase of a field the question uses.
+     *
+     * @param string[] $phrases
+     */
+    private function phraseHit(string $text, array $phrases): int
+    {
+        return strlen($this->matchedPhrase($text, $phrases));
+    }
+
+    /**
+     * The longest phrase the question uses, as written.
+     *
+     * @param string[] $phrases
+     */
+    private function matchedPhrase(string $text, array $phrases): string
+    {
+        $best = '';
+        foreach ($phrases as $phrase) {
+            $needle = $this->normalisePhrase((string) $phrase);
+            if ($needle === '' || strlen($needle) < 3) {
+                continue;
+            }
+            if (str_contains($text, ' ' . $needle . ' ') || (strlen($needle) >= 5 && str_contains($text, $needle))) {
+                if (strlen($needle) > strlen($best)) {
+                    $best = $needle;
+                }
+            }
+        }
+
+        return $best;
+    }
+
+    /** True when the question uses this phrase as a whole word. */
+    private function phraseIn(string $text, string $phrase): bool
+    {
+        $needle = $this->normalisePhrase($phrase);
+        if ($needle === '' || strlen($needle) < 3) {
+            return false;
+        }
+
+        return str_contains($text, ' ' . $needle . ' ') || str_contains($text, ' ' . $needle . 's ');
+    }
+
+    /**
+     * True when the question names this dataset.
+     *
+     * @param array<string,mixed> $dataset
+     */
+    private function namesDataset(string $text, array $dataset): bool
+    {
+        $names = array_merge(
+            [(string) ($dataset['name'] ?? ''), (string) ($dataset['label'] ?? '')],
+            array_map('strval', (array) ($dataset['aliases'] ?? []))
+        );
+        foreach ($names as $name) {
+            if ($this->phraseIn($text, $name)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The dimensions of a dataset the question names.
+     *
+     * @param array<string,mixed> $dataset
+     * @return string[]
+     */
+    private function fieldsNamed(string $text, array $dataset): array
+    {
+        $fields = [];
+        foreach ((array) ($dataset['dimensions'] ?? []) as $dimension) {
+            if (!is_array($dimension)) {
+                continue;
+            }
+            $name = (string) ($dimension['name'] ?? '');
+            if ($name === '') {
+                continue;
+            }
+            $phrases = array_merge(
+                [$name, (string) ($dimension['label'] ?? '')],
+                array_map('strval', (array) ($dimension['aliases'] ?? []))
+            );
+            if ($this->phraseHit($text, $phrases) > 0) {
+                $fields[] = $name;
+            }
+        }
+
+        return $fields;
+    }
+
+    /**
+     * The dimension that names a record of the dataset.
+     *
+     * @param array<string,mixed> $dataset
+     */
+    private function identityDimension(array $dataset): string
+    {
+        $names = [];
+        foreach ((array) ($dataset['dimensions'] ?? []) as $dimension) {
+            if (is_array($dimension)) {
+                $names[] = (string) ($dimension['name'] ?? '');
+            }
+        }
+        foreach (['name', 'title', 'unit', 'serial', 'client', 'project'] as $candidate) {
+            if (in_array($candidate, $names, true)) {
+                return $candidate;
+            }
+        }
+
+        return '';
+    }
+
     /** Last resort when the model gives nothing usable: read the question. */
     private function guessIntent(string $question): string
     {
@@ -441,7 +773,7 @@ final class AssistantService
         if ($override === '') {
             $lines = array_merge($lines, [
                 'Reply with JSON only, no prose, shaped like:',
-                '{"intent":"data|knowledge|document|action|report|help|smalltalk","plan":{}}',
+                '{"intent":"data|knowledge|document|action|report|help|smalltalk|clarify","plan":{}}',
                 'For intent "data" the plan object is:',
                 '{"dataset":"name","metrics":["name"],"dimensions":["name"],'
                 . '"filters":[{"field":"name","operator":"=|!=|>|>=|<|<=|like|contains|in|not_in|between|is_null|not_null","value":null}],'
@@ -462,6 +794,7 @@ final class AssistantService
                 '- Content of uploaded files is "document". Writes (add, change, remove) are "action". Recurring digests are "report".',
                 '- "help" only when the user asks what you can do or how to use you; "smalltalk" for greetings and general conversation.',
                 '- If no dataset fits, choose "knowledge" or "help" rather than guessing a dataset.',
+                '- When the question asks for "the report" without saying which one, and the reports below list more than one, choose "clarify" and put the report names in plan.options.',
                 '- Relative periods ("last year", "this month") resolve against the current date below: put the preset in date_range.preset instead of computing from/to yourself.',
             ]);
         }
@@ -476,6 +809,10 @@ final class AssistantService
         if ($vocabulary !== '') {
             $lines[] = 'Vocabulary:';
             $lines[] = $vocabulary;
+        }
+        $screens = $this->packReportSection();
+        if ($screens !== '') {
+            $lines[] = $screens;
         }
         $custom = trim(Config::string('domain.custom_instructions', ''));
         if ($custom !== '') {
@@ -555,6 +892,141 @@ final class AssistantService
         } catch (\Throwable) {
             return '';
         }
+    }
+
+    /**
+     * The screens this CRM calls reports, for the router.
+     *
+     * A CRM that ships report screens wants "the collections report" answered
+     * with the same numbers the screen shows, so the router is told which
+     * dataset each screen stands for.
+     */
+    private function packReportSection(): string
+    {
+        $reports = $this->packReports();
+        if ($reports === []) {
+            return '';
+        }
+        $lines = ['Reports this CRM already has (answer them with the dataset behind them):'];
+        foreach (array_slice($reports, 0, 30) as $report) {
+            $name = trim((string) ($report['label'] ?? '')) ?: trim((string) ($report['name'] ?? ''));
+            if ($name === '') {
+                continue;
+            }
+            $line = '- ' . $name;
+            if ((string) ($report['dataset'] ?? '') !== '') {
+                $line .= ' -> dataset ' . (string) $report['dataset'];
+            }
+            if ((string) ($report['question'] ?? '') !== '') {
+                $line .= ' ("' . (string) $report['question'] . '")';
+            }
+            $lines[] = $line;
+        }
+
+        return count($lines) > 1 ? implode("\n", $lines) : '';
+    }
+
+    /**
+     * The report screen this question names, when the pack declares one.
+     *
+     * @return array<string,mixed>|null
+     */
+    private function matchedPackReport(AskRequest $request): ?array
+    {
+        $match = $this->packReportMatch($request);
+
+        return $match['report'];
+    }
+
+    /**
+     * The report screen this question names, and the phrase that named it.
+     *
+     * The longest name the question uses wins: "the collections report" must
+     * not fall for the "leads report" that also appears in the question.
+     *
+     * @return array{report:array<string,mixed>|null,phrase:string}
+     */
+    private function packReportMatch(AskRequest $request): array
+    {
+        $text = $this->questionWords($request->question);
+        $best = null;
+        $bestPhrase = '';
+        foreach ($this->packReports() as $report) {
+            $names = array_merge(
+                [(string) ($report['name'] ?? ''), (string) ($report['label'] ?? '')],
+                array_map('strval', (array) ($report['aliases'] ?? []))
+            );
+            $phrase = $this->matchedPhrase($text, $names);
+            if (strlen($phrase) > strlen($bestPhrase)) {
+                $best = $report;
+                $bestPhrase = $phrase;
+            }
+        }
+
+        return ['report' => $best, 'phrase' => $bestPhrase];
+    }
+
+    /**
+     * The plan behind a report screen this CRM already has.
+     *
+     * A CRM that ships report screens wants "the collections report" answered
+     * with the numbers that screen shows, not with a stored report to pick
+     * from. The pack says which dataset the screen stands for and, when the
+     * screen has a fixed shape, the columns it shows.
+     *
+     * @param array<string,mixed> $report
+     * @return array<string,mixed>
+     */
+    private function planForPackReport(array $report, AskRequest $request): array
+    {
+        $declared = (array) ($report['plan'] ?? []);
+        $dataset = trim((string) ($declared['dataset'] ?? $report['dataset'] ?? ''));
+        if ($dataset === '') {
+            return [];
+        }
+        if ($declared !== []) {
+            return $this->fixedPlan($dataset, $declared);
+        }
+        // A report that names only its dataset is answered with the question
+        // its screen answers, so the model writes the query the screen runs.
+        $question = trim((string) ($report['question'] ?? ''));
+        if ($question === '') {
+            return [];
+        }
+        $screen = new AskRequest($question, $request->user, $request->history, $request->context, $request->options);
+        $plan = $this->askForPlan($screen, '');
+        if ($plan === []) {
+            return [];
+        }
+        $plan['dataset'] = $dataset;
+
+        return $plan;
+    }
+
+    /**
+     * The plan of a report screen, exactly as the screen shows it.
+     *
+     * @param array<string,mixed> $declared
+     * @return array<string,mixed>
+     */
+    private function fixedPlan(string $dataset, array $declared): array
+    {
+        $plan = [
+            'dataset' => $dataset,
+            'dimensions' => array_values(array_map('strval', (array) ($declared['dimensions'] ?? []))),
+            'metrics' => array_values(array_map('strval', (array) ($declared['metrics'] ?? []))),
+            'limit' => max(1, (int) ($declared['limit'] ?? 20)),
+            // The shape is the screen's, not the question's: the columns the
+            // user typed must not rewrite the columns the report shows.
+            'fixed' => true,
+        ];
+        foreach (['order_by', 'filters', 'group_by', 'date_range'] as $key) {
+            if (isset($declared[$key]) && is_array($declared[$key])) {
+                $plan[$key] = $declared[$key];
+            }
+        }
+
+        return $plan;
     }
 
     /**
@@ -731,12 +1203,12 @@ final class AssistantService
         $export = $this->exportFor($request, $result, $compiled);
 
         $citations = $this->dataCitations($compiled, $result);
-        $report = $this->matchedReport($request);
+        $report = $this->matchedReport($request) ?? $this->matchedPackReport($request);
         if ($report !== null) {
             $citations[] = new Citation(
                 'query',
                 (string) $report['name'],
-                (string) $report['id'],
+                (string) ($report['id'] ?? ''),
                 ['module' => (string) ($report['module'] ?? '')]
             );
         }
@@ -879,7 +1351,14 @@ final class AssistantService
         $plan = $this->withDateFieldFixes($plan);
         $plan = $this->withDisplayLabels($plan, $question);
         $plan = $this->withDimensionColumns($plan, $question);
+        // A report screen has a shape of its own: the columns it shows, not the
+        // ones the question happens to mention.
+        if (($plan['fixed'] ?? false) === true) {
+            return $this->withKnownFields($this->withRelativePeriod($plan, $question));
+        }
         $plan = $this->withMentionedFields($plan, $question);
+        $plan = $this->withRecordList($plan, $question);
+        $plan = $this->withKnownFields($plan);
         $plan = $this->withPeriodTotals($plan, $question);
         $plan = $this->withRelativePeriod($this->withDefaultShape($plan, $question), $question);
 
@@ -1118,19 +1597,19 @@ final class AssistantService
         if ($this->pack === null || !isset($plan['dataset']) || !is_string($plan['dataset'])) {
             return $plan;
         }
-        if ((array) ($plan['metrics'] ?? []) !== []) {
-            return $plan;
-        }
         $dataset = $this->pack->dataset($plan['dataset']);
         if ($dataset === null) {
             return $plan;
         }
-        $words = ' ' . trim((string) preg_replace('/[^a-z0-9_ ]+/u', ' ', strtolower($question)), ' ') . ' ';
+        $words = $this->questionWords($question);
         $wantsId = preg_match('/\bids?\b/i', $question) === 1;
         $chosen = [];
         foreach ((array) ($plan['dimensions'] ?? []) as $dimension) {
             $chosen[] = (string) $dimension;
         }
+        // The fields the question names that this table does not have: the
+        // answer says where they live instead of quietly dropping them.
+        $missing = $this->missingFieldsFor($dataset, $words);
         $named = [];
         foreach ((array) ($dataset['dimensions'] ?? []) as $dimension) {
             if (!is_array($dimension)) {
@@ -1152,17 +1631,7 @@ final class AssistantService
                 [$name, (string) ($dimension['label'] ?? '')],
                 array_map('strval', (array) ($dimension['aliases'] ?? []))
             );
-            $hit = 0;
-            foreach ($phrases as $phrase) {
-                // Column aliases use snake_case; a question uses spaces.
-                $phrase = strtolower(trim((string) preg_replace('/[^a-z0-9_ ]+/u', ' ', str_replace('_', ' ', $phrase))));
-                if ($phrase === '' || strlen($phrase) < 3) {
-                    continue;
-                }
-                if (str_contains($words, ' ' . $phrase . ' ') || (strlen($phrase) >= 5 && str_contains($words, $phrase))) {
-                    $hit = max($hit, strlen($phrase));
-                }
-            }
+            $hit = $this->phraseHit($words, $phrases);
             if ($hit > 0) {
                 $named[] = [$hit, $name];
             }
@@ -1221,8 +1690,298 @@ final class AssistantService
         if ($chosen !== []) {
             $plan['dimensions'] = array_values(array_unique($chosen));
         }
+        // The measures the question names. The router's own choice is kept and
+        // a measure it missed is added: "users with their sales and quiet days"
+        // asks for numbers per user, and half of them is no answer.
+        $metrics = array_map('strval', (array) ($plan['metrics'] ?? []));
+        $covered = $this->metricPhrases($dataset, $metrics);
+        foreach ($this->namedMetricHits($dataset, $words, $chosen) as $hit) {
+            if (count($metrics) >= 4) {
+                break;
+            }
+            if (in_array($hit['name'], $metrics, true)) {
+                continue;
+            }
+            if ($hit['phrase'] !== '' && in_array($hit['phrase'], $covered, true)) {
+                continue;
+            }
+            $metrics[] = $hit['name'];
+            $covered[] = $hit['phrase'];
+        }
+        if ($metrics !== []) {
+            $plan['metrics'] = array_values(array_unique($metrics));
+        }
+        if ($missing !== []) {
+            $plan['missing_fields'] = array_values(array_unique(array_merge(
+                array_map('strval', (array) ($plan['missing_fields'] ?? [])),
+                $missing
+            )));
+        }
 
         return $plan;
+    }
+
+    /**
+     * The words a set of measures answers to.
+     *
+     * @param array<string,mixed> $dataset
+     * @param string[] $names
+     * @return string[]
+     */
+    private function metricPhrases(array $dataset, array $names): array
+    {
+        $phrases = [];
+        foreach ($names as $name) {
+            $metric = $this->pack?->metric((string) ($dataset['name'] ?? ''), $name);
+            if ($metric === null) {
+                continue;
+            }
+            foreach (array_merge(
+                [(string) ($metric['name'] ?? ''), (string) ($metric['label'] ?? '')],
+                array_map('strval', (array) ($metric['aliases'] ?? []))
+            ) as $phrase) {
+                $needle = $this->normalisePhrase($phrase);
+                if ($needle !== '') {
+                    $phrases[] = $needle;
+                }
+            }
+        }
+
+        return array_values(array_unique($phrases));
+    }
+
+    /**
+     * The fields the question names that this dataset does not have.
+     *
+     * "client, amount paid, paid for, balance" against project payments names
+     * balance — which the CRM keeps on its dues, not on a receipt. The answer
+     * has to say so instead of dropping the word without a word.
+     *
+     * @param array<string,mixed> $dataset
+     * @return string[]
+     */
+    private function missingFieldsFor(array $dataset, string $words): array
+    {
+        if ($this->pack === null) {
+            return [];
+        }
+        $here = $this->fieldKeys($dataset);
+        // The dataset's own name counts as covered: "Payments include…" names
+        // the table itself, not a field of it.
+        foreach (array_merge(
+            [(string) ($dataset['name'] ?? ''), (string) ($dataset['label'] ?? '')],
+            array_map('strval', (array) ($dataset['aliases'] ?? []))
+        ) as $name) {
+            $key = DomainPack::key($name);
+            if ($key === '') {
+                continue;
+            }
+            $here[$key] = true;
+            $tail = (string) preg_replace('/^.*[\s_]/', '', $name);
+            if ($tail !== $name && DomainPack::key($tail) !== '') {
+                $here[DomainPack::key($tail)] = true;
+            }
+        }
+
+        $missing = [];
+        foreach ($this->pack->listDatasets() as $entry) {
+            if ((string) ($entry['name'] ?? '') === (string) ($dataset['name'] ?? '')) {
+                continue;
+            }
+            foreach (['dimensions', 'metrics'] as $group) {
+                foreach ((array) ($entry[$group] ?? []) as $field) {
+                    if (!is_array($field)) {
+                        continue;
+                    }
+                    // The field's own name is too generic to go by ("state",
+                    // "type"); its label and aliases say what a person calls it.
+                    $phrases = array_merge(
+                        [(string) ($field['label'] ?? '')],
+                        array_map('strval', (array) ($field['aliases'] ?? []))
+                    );
+                    $phrase = $this->matchedPhrase($words, $phrases);
+                    // A short word is a preposition more often than a field.
+                    if (strlen($phrase) < 5) {
+                        continue;
+                    }
+                    $phraseKey = DomainPack::key($phrase);
+                    if ($phraseKey === '' || isset($here[$phraseKey])) {
+                        continue;
+                    }
+                    $missing[] = $phrase;
+                    $here[$phraseKey] = true;
+                }
+            }
+        }
+
+        return array_slice(array_values(array_unique($missing)), 0, 3);
+    }
+
+    /**
+     * Every word a dataset's own fields answer to.
+     *
+     * @param array<string,mixed> $dataset
+     * @return array<string,true>
+     */
+    private function fieldKeys(array $dataset): array
+    {
+        $keys = [];
+        foreach (['dimensions', 'metrics'] as $group) {
+            foreach ((array) ($dataset[$group] ?? []) as $field) {
+                if (!is_array($field)) {
+                    continue;
+                }
+                foreach (array_merge(
+                    [(string) ($field['name'] ?? ''), (string) ($field['label'] ?? '')],
+                    array_map('strval', (array) ($field['aliases'] ?? []))
+                ) as $label) {
+                    $key = DomainPack::key($label);
+                    if ($key !== '') {
+                        $keys[$key] = true;
+                    }
+                }
+            }
+        }
+
+        return $keys;
+    }
+
+    /**
+     * The measures the question names, best match first.
+     *
+     * A metric that only counts the rows of the dataset itself is not a measure
+     * the user asked for: "10 best leads" says nothing about how many leads
+     * there are, and counting them hides the records themselves.
+     *
+     * @param array<string,mixed> $dataset
+     * @param string[] $chosen the columns the answer will show
+     * @return string[]
+     */
+    private function namedMetrics(array $dataset, string $words, array $chosen): array
+    {
+        return array_map(
+            static fn (array $hit): string => (string) $hit['name'],
+            $this->namedMetricHits($dataset, $words, $chosen)
+        );
+    }
+
+    /**
+     * The measures the question names, with the words that named them.
+     *
+     * @param array<string,mixed> $dataset
+     * @param string[] $chosen the columns the answer will show
+     * @return array<int,array{name:string,hit:int,phrase:string}>
+     */
+    private function namedMetricHits(array $dataset, string $words, array $chosen): array
+    {
+        $table = strtolower(trim((string) ($dataset['table'] ?? '')));
+        $hits = [];
+        foreach ((array) ($dataset['metrics'] ?? []) as $metric) {
+            if (!is_array($metric)) {
+                continue;
+            }
+            $name = (string) ($metric['name'] ?? '');
+            if ($name === '' || $this->countsOwnRows($metric, $table)) {
+                continue;
+            }
+            $phrases = array_merge(
+                [$name, (string) ($metric['label'] ?? '')],
+                array_map('strval', (array) ($metric['aliases'] ?? []))
+            );
+            $hit = 0;
+            $phrase = '';
+            foreach ($phrases as $candidate) {
+                $length = $this->phraseHit($words, [$candidate]);
+                if ($length <= $hit) {
+                    continue;
+                }
+                // The same words already name a column: that column is what the
+                // user asked for, not a total over it.
+                if ($this->coversColumn($this->normalisePhrase((string) $candidate), $dataset, $chosen)) {
+                    continue;
+                }
+                $hit = $length;
+                $phrase = $this->normalisePhrase((string) $candidate);
+            }
+            if ($hit > 0) {
+                $hits[] = ['name' => $name, 'hit' => $hit, 'phrase' => $phrase];
+            }
+        }
+        usort($hits, static fn (array $a, array $b): int => $b['hit'] <=> $a['hit']);
+        $out = [];
+        foreach ($hits as $hit) {
+            // Two measures that answer to the same words are one measure.
+            $same = false;
+            foreach ($out as $picked) {
+                if ($hit['phrase'] === '' || $picked['phrase'] === '') {
+                    continue;
+                }
+                if ($hit['phrase'] === $picked['phrase'] || str_contains($picked['phrase'], $hit['phrase'])) {
+                    $same = true;
+                    break;
+                }
+            }
+            if ($same) {
+                continue;
+            }
+            $out[] = $hit;
+            if (count($out) >= 3) {
+                break;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * True when a phrase the question uses is one of the columns it names.
+     *
+     * @param array<string,mixed> $dataset
+     * @param string[] $chosen
+     */
+    private function coversColumn(string $phrase, array $dataset, array $chosen): bool
+    {
+        foreach ($chosen as $name) {
+            $dimension = $this->pack?->dimension((string) ($dataset['name'] ?? ''), (string) $name);
+            if ($dimension === null) {
+                continue;
+            }
+            $phrases = array_merge(
+                [(string) ($dimension['name'] ?? ''), (string) ($dimension['label'] ?? '')],
+                array_map('strval', (array) ($dimension['aliases'] ?? []))
+            );
+            foreach ($phrases as $candidate) {
+                $needle = $this->normalisePhrase((string) $candidate);
+                if ($needle === '' || $phrase === '') {
+                    continue;
+                }
+                if ($needle === $phrase || str_contains($needle, $phrase) || str_contains($phrase, $needle)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * True when a metric counts the rows of the dataset itself.
+     *
+     * @param array<string,mixed> $metric
+     */
+    private function countsOwnRows(array $metric, string $table): bool
+    {
+        $function = strtolower(trim((string) ($metric['function'] ?? '')));
+        if (!in_array($function, ['count', 'count_distinct'], true)) {
+            return false;
+        }
+        $column = strtolower(trim((string) ($metric['column'] ?? '')));
+        if ($column === '' || $column === '*' || !str_contains($column, '.')) {
+            return true;
+        }
+        $prefix = strtolower((string) explode('.', $column)[0]);
+
+        return $table === '' || $prefix === $table;
     }
 
     /**
@@ -1393,6 +2152,147 @@ final class AssistantService
         } catch (\Throwable) {
             return '';
         }
+    }
+
+    /**
+     * A record list, not a ranking.
+     *
+     * "10 best leads and their contact details" asks for ten records. A plan
+     * that groups by source and counts them answers a different question, so
+     * the grouping is dropped and the fields the user named are kept.
+     *
+     * @param array<string,mixed> $plan
+     * @return array<string,mixed>
+     */
+    private function withRecordList(array $plan, string $question): array
+    {
+        if ($this->pack === null || !isset($plan['dataset']) || !is_string($plan['dataset'])) {
+            return $plan;
+        }
+        $dataset = $this->pack->dataset($plan['dataset']);
+        if ($dataset === null) {
+            return $plan;
+        }
+        $words = $this->questionWords($question);
+        // "leads by source" is a breakdown, not a list of leads.
+        if (preg_match('/\b(by|per|each|grouped|breakdown|broken|split|versus|vs|compared?)\b/', $words) === 1) {
+            return $plan;
+        }
+        $cue = preg_match('/\b(list|show|display|give|fetch|bring)\b/', $words) === 1
+            || preg_match('/\b(first|last|top|bottom|best|worst|newest|latest|recent)\s+\d{1,4}\b/', $words) === 1
+            || preg_match('/\b\d{1,4}\s+(best|worst|latest|newest|recent|top|first|last)\b/', $words) === 1;
+        if (!$cue) {
+            return $plan;
+        }
+        // A question that names a measure asks for a number, not for records.
+        if ($this->namedMetrics($dataset, $words, []) !== []) {
+            return $plan;
+        }
+        $table = strtolower(trim((string) ($dataset['table'] ?? '')));
+        foreach ((array) ($plan['metrics'] ?? []) as $metric) {
+            $entry = $this->pack->metric((string) $plan['dataset'], (string) $metric);
+            if ($entry === null || !$this->countsOwnRows($entry, $table)) {
+                return $plan;
+            }
+        }
+        unset($plan['metrics']);
+        $dimensions = array_values(array_map('strval', (array) ($plan['dimensions'] ?? [])));
+        $identity = $this->identityDimension($dataset);
+        if ($identity !== '' && !in_array($identity, $dimensions, true)) {
+            array_unshift($dimensions, $identity);
+        }
+        if ($dimensions !== []) {
+            $plan['dimensions'] = $dimensions;
+        }
+        $limit = $this->recordListLimit($words);
+        if ($limit > 0) {
+            $plan['limit'] = $limit;
+        }
+
+        return $plan;
+    }
+
+    /**
+     * How many records the question asks for.
+     *
+     * "10 best leads" and "the first 10 leads" both ask for ten.
+     */
+    private function recordListLimit(string $words): int
+    {
+        if (preg_match('/\b(\d{1,4})\s+(best|worst|latest|newest|recent|top|first|last)\b/', $words, $m) === 1) {
+            return max(1, (int) $m[1]);
+        }
+        if (preg_match('/\b(first|last|top|bottom|best|worst|newest|latest|recent)\s+(\d{1,4})\b/', $words, $m) === 1) {
+            return max(1, (int) $m[2]);
+        }
+
+        return 0;
+    }
+
+    /**
+     * Fields the pack does not have.
+     *
+     * A question that names a column the dataset does not have must not take
+     * the whole answer down: the compiler refuses an unknown field and the
+     * user gets nothing at all. The field is dropped and remembered, so the
+     * answer can say where that figure lives instead.
+     *
+     * @param array<string,mixed> $plan
+     * @return array<string,mixed>
+     */
+    private function withKnownFields(array $plan): array
+    {
+        if ($this->pack === null || !isset($plan['dataset']) || !is_string($plan['dataset'])) {
+            return $plan;
+        }
+        $dataset = (string) $plan['dataset'];
+        $missing = array_map('strval', (array) ($plan['missing_fields'] ?? []));
+        // A dimension the dataset does not have is dropped: the rest of the
+        // columns are still worth showing. A measure is not — replacing it
+        // would answer with a number the user never asked for, so the
+        // compiler keeps refusing it.
+        $keep = [];
+        foreach ((array) ($plan['dimensions'] ?? []) as $field) {
+            $name = (string) $field;
+            if ($name === '') {
+                continue;
+            }
+            if ($this->pack->dimension($dataset, $name) !== null) {
+                $keep[] = $name;
+                continue;
+            }
+            // A measure named as a column is a column the table does not have.
+            // The compiler ignores it, so it is dropped here rather than
+            // carried into the answer as a column that never appears.
+            if ($this->pack->metric($dataset, $name) === null && !in_array($name, $missing, true)) {
+                $missing[] = $name;
+            }
+        }
+        if ($keep !== []) {
+            $plan['dimensions'] = $keep;
+        } else {
+            unset($plan['dimensions']);
+        }
+        $filters = [];
+        foreach ((array) ($plan['filters'] ?? []) as $filter) {
+            if (!is_array($filter)) {
+                continue;
+            }
+            $field = (string) ($filter['field'] ?? '');
+            if ($field === '' || $this->pack->dimension($dataset, $field) !== null) {
+                $filters[] = $filter;
+                continue;
+            }
+            if (!in_array($field, $missing, true)) {
+                $missing[] = $field;
+            }
+        }
+        $plan['filters'] = $filters;
+        if ($missing !== []) {
+            $plan['missing_fields'] = $missing;
+        }
+
+        return $plan;
     }
 
     /**
@@ -2141,6 +3041,7 @@ final class AssistantService
 
         $period = (string) ($compiled['applied_filters']['period'] ?? '');
         $dataset = (string) ($compiled['dataset'] ?? '');
+        $missing = $this->missingFields($compiled);
         $currency = trim(Config::string('domain.currency', ''));
         $money = $currency !== ''
             ? ' Write money with thousands separators and the currency ' . $currency . ' (for example "'
@@ -2155,13 +3056,15 @@ final class AssistantService
             . ' Keep every digit.'
             . ' Never say the information is missing,'
             . ' incomplete or unavailable, and never apologise, when the table has rows.'
-            . ' Never claim that every row shares a value ("all dated 25-08-2026") unless it is true; name a few rows instead.',
+            . ' Never claim that every row shares a value ("all dated 25-08-2026") unless it is true; name a few rows instead.'
+            . ($missing === [] ? '' : ' This table has no column for: ' . implode(', ', $missing) . '. Never say that figure is in the table.'),
             $request->question,
             []
         );
         $reply = trim((string) ($this->chat($messages)['content'] ?? ''));
+        $note = $this->missingFieldNote($compiled, $request->question);
         if ($reply !== '' && self::numbersAreSourced($reply, $result, $compiled)) {
-            return $reply;
+            return $note === '' ? $reply : $reply . "\n\n" . $note;
         }
 
         $label = '';
@@ -2173,7 +3076,106 @@ final class AssistantService
         }
 
         return 'Showing ' . $result->count() . ($label !== '' ? ' ' . strtolower($label) : ' records')
-            . ($period !== '' ? ' (' . $period . ')' : '') . '.';
+            . ($period !== '' ? ' (' . $period . ')' : '') . '.'
+            . ($note === '' ? '' : "\n\n" . $note);
+    }
+
+    /**
+     * The fields the question asked for that this table does not have.
+     *
+     * @param array<string,mixed> $compiled
+     * @return string[]
+     */
+    private function missingFields(array $compiled): array
+    {
+        $missing = [];
+        foreach ((array) ($compiled['plan']['missing_fields'] ?? []) as $field) {
+            $name = trim((string) $field);
+            if ($name !== '' && !in_array($name, $missing, true)) {
+                $missing[] = $name;
+            }
+        }
+
+        return $missing;
+    }
+
+    /**
+     * Where a field the question asked for actually lives.
+     *
+     * @param array<string,mixed> $compiled
+     */
+    private function missingFieldNote(array $compiled, string $question): string
+    {
+        $missing = $this->missingFields($compiled);
+        if ($missing === []) {
+            return '';
+        }
+        $dataset = (string) ($compiled['dataset'] ?? '');
+        $parts = [];
+        foreach ($missing as $field) {
+            $home = $this->fieldHome($field, $question, $dataset);
+            $parts[] = $home === '' ? $field : $field . ' (' . $home . ')';
+        }
+
+        return 'The table has no column for: ' . implode(', ', $parts) . '.';
+    }
+
+    /**
+     * The dataset that keeps a field, when the answer's own dataset does not.
+     *
+     * @param string $dataset the dataset the answer came from
+     */
+    private function fieldHome(string $name, string $question, string $dataset): string
+    {
+        if ($this->pack === null) {
+            return '';
+        }
+        $wanted = DomainPack::key($name);
+        $words = $this->questionWords($question);
+        $candidates = [];
+        foreach ($this->pack->listDatasets() as $entry) {
+            if ((string) ($entry['name'] ?? '') === $dataset) {
+                continue;
+            }
+            foreach (['dimensions', 'metrics'] as $key) {
+                foreach ((array) ($entry[$key] ?? []) as $field) {
+                    if (!is_array($field)) {
+                        continue;
+                    }
+                    $labels = array_merge(
+                        [(string) ($field['name'] ?? ''), (string) ($field['label'] ?? '')],
+                        array_map('strval', (array) ($field['aliases'] ?? []))
+                    );
+                    $match = false;
+                    foreach ($labels as $label) {
+                        if ($label !== '' && DomainPack::key($label) === $wanted) {
+                            $match = true;
+                            break;
+                        }
+                    }
+                    if (!$match) {
+                        continue;
+                    }
+                    $datasetLabel = trim((string) ($entry['label'] ?? '')) ?: (string) ($entry['name'] ?? '');
+                    $fieldLabel = trim((string) ($field['label'] ?? '')) ?: (string) ($field['name'] ?? '');
+                    // The wording the question used picks the right one: "the
+                    // client" is a client name, not a lead name.
+                    $score = 0;
+                    foreach (preg_split('/\W+/', strtolower($fieldLabel . ' ' . $datasetLabel)) ?: [] as $word) {
+                        if (strlen($word) >= 4 && str_contains($words, ' ' . $word . ' ')) {
+                            $score++;
+                        }
+                    }
+                    $candidates[] = ['score' => $score, 'home' => 'kept in ' . $datasetLabel . ' as ' . $fieldLabel];
+                }
+            }
+        }
+        if ($candidates === []) {
+            return '';
+        }
+        usort($candidates, static fn (array $a, array $b): int => $b['score'] <=> $a['score']);
+
+        return (string) $candidates[0]['home'];
     }
 
     /**

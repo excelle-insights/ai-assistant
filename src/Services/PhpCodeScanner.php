@@ -77,13 +77,14 @@ final class PhpCodeScanner implements CodeScannerInterface
             }
         }
 
-        // The map is the index; the sweep only fills what it missed.
-        if (count($byPath) < 5) {
-            foreach ($roots as $root) {
-                foreach ($this->sweep($root, $maxDepth, $maxFiles, $maxSize) as $file) {
-                    if (!isset($byPath[$file])) {
-                        $byPath[$file] = '';
-                    }
+        // The map is the index; the sweep fills what it missed. A CRM that
+        // splits its menu into a file per section has many navigation files,
+        // and a page the menu never names is still code the assistant should
+        // be able to read.
+        foreach ($roots as $root) {
+            foreach ($this->sweep($root, $maxDepth, $maxFiles, $maxSize) as $file) {
+                if (!isset($byPath[$file])) {
+                    $byPath[$file] = '';
                 }
             }
         }
@@ -189,7 +190,7 @@ final class PhpCodeScanner implements CodeScannerInterface
             }
         });
 
-        return array_slice(array_values(array_unique($found)), 0, 3);
+        return array_slice(array_values(array_unique($found)), 0, 40);
     }
 
     /**
@@ -331,6 +332,34 @@ final class PhpCodeScanner implements CodeScannerInterface
     // ─── SQL extraction ──────────────────────────────────────────────────────
 
     /**
+     * The token that carries the text inside an interpolated heredoc.
+     *
+     * PHP has named it more than once (T_ENCAPSED_AND_QUOTED, then
+     * T_ENCAPSED_AND_WHITESPACE), and a constant that does not exist is a
+     * fatal error, so it is looked up at runtime.
+     *
+     * @return int[]
+     */
+    private static function heredocTextTokens(): array
+    {
+        static $tokens = null;
+        if ($tokens !== null) {
+            return $tokens;
+        }
+        $tokens = [];
+        foreach (['T_ENCAPSED_AND_WHITESPACE', 'T_ENCAPSED_AND_QUOTED'] as $name) {
+            if (defined($name)) {
+                $tokens[] = (int) constant($name);
+            }
+        }
+        if ($tokens === []) {
+            $tokens[] = 268;
+        }
+
+        return $tokens;
+    }
+
+    /**
      * Every query in one file, with the function it sits in.
      *
      * @return array<int,array<string,mixed>>
@@ -407,7 +436,7 @@ final class PhpCodeScanner implements CodeScannerInterface
                 $heredoc = ['sql' => '', 'function' => $function, 'dynamic' => false];
                 continue;
             }
-            if ($heredoc !== null && $id === T_ENCAPSED_AND_QUOTED) {
+            if ($heredoc !== null && in_array($id, self::heredocTextTokens(), true)) {
                 $heredoc['sql'] .= $text;
                 continue;
             }

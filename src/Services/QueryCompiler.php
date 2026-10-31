@@ -341,15 +341,18 @@ final class QueryCompiler
             }
         }
         foreach ($this->dimensionsOf($dataset) as $dimension) {
-            $via = DomainPack::key((string) ($dimension['via'] ?? ''));
-            if ($via !== '' && $via !== DomainPack::key($table) && isset($declared[$via])) {
-                foreach ($wanted as $name) {
-                    if (self::same((string) $dimension['name'], (string) $name) || self::same((string) ($dimension['label'] ?? ''), (string) $name)) {
-                        $needed[$via] = $declared[$via];
+            foreach ($this->viaKeys($dimension) as $via) {
+                if ($via !== DomainPack::key($table) && isset($declared[$via])) {
+                    foreach ($wanted as $name) {
+                        if (self::same((string) $dimension['name'], (string) $name) || self::same((string) ($dimension['label'] ?? ''), (string) $name)) {
+                            $needed[$via] = $declared[$via];
+                        }
                     }
                 }
             }
         }
+
+        $needed = $this->orderedJoins($needed);
 
         $out = [];
         $seen = [];
@@ -404,12 +407,104 @@ final class QueryCompiler
                     }
                 }
             }
-            $via = DomainPack::key((string) ($dimension['via'] ?? ''));
-            if ($via !== '') {
-                $keys[] = $via;
+            if ($dimension !== null) {
+                foreach ($this->viaKeys($dimension) as $via) {
+                    $keys[] = $via;
+                }
             }
         }
         return array_values(array_unique($keys));
+    }
+
+    /**
+     * The join keys a dimension needs. "via" may name one table or a chain of
+     * them: a client reached through a payment record needs both joins.
+     *
+     * @param array<string,mixed> $dimension
+     * @return string[]
+     */
+    private function viaKeys(array $dimension): array
+    {
+        $keys = [];
+        foreach ((array) ($dimension['via'] ?? []) as $via) {
+            if (!is_string($via)) {
+                continue;
+            }
+            $key = DomainPack::key($via);
+            if ($key !== '') {
+                $keys[] = $key;
+            }
+        }
+        return array_values(array_unique($keys));
+    }
+
+    /**
+     * Order the needed joins so a join whose condition points at another
+     * join's alias comes after it — SQL cannot join a table that is not in
+     * the FROM yet.
+     *
+     * @param array<string,array<string,mixed>> $needed
+     * @return array<string,array<string,mixed>>
+     */
+    private function orderedJoins(array $needed): array
+    {
+        if (count($needed) < 2) {
+            return $needed;
+        }
+        $ordered = [];
+        $pending = $needed;
+        $guard = count($needed) + 2;
+        while ($pending !== [] && $guard-- > 0) {
+            $moved = false;
+            foreach ($pending as $key => $join) {
+                if ($this->waitsForJoin($key, $join, $pending)) {
+                    continue;
+                }
+                $ordered[$key] = $join;
+                unset($pending[$key]);
+                $moved = true;
+            }
+            if (!$moved) {
+                break;
+            }
+        }
+        // A cycle cannot be ordered; the pack's own order is used for the rest.
+        foreach ($pending as $key => $join) {
+            $ordered[$key] = $join;
+        }
+        return $ordered;
+    }
+
+    /**
+     * True when this join's condition names a table that another pending join
+     * introduces.
+     *
+     * @param array<string,mixed> $join
+     * @param array<string,array<string,mixed>> $pending
+     */
+    private function waitsForJoin(string $key, array $join, array $pending): bool
+    {
+        foreach ((array) ($join['on'] ?? []) as $local => $remote) {
+            $clean = str_replace('`', '', trim((string) $local));
+            if (!str_contains($clean, '.')) {
+                continue;
+            }
+            [$prefix] = preg_split('/\s*\.\s*/', $clean, 2) ?: [];
+            $prefixKey = DomainPack::key((string) $prefix);
+            if ($prefixKey === '') {
+                continue;
+            }
+            foreach ($pending as $otherKey => $other) {
+                if ($otherKey === $key) {
+                    continue;
+                }
+                if ($prefixKey === DomainPack::key((string) ($other['alias'] ?? ''))
+                    || $prefixKey === DomainPack::key((string) ($other['table'] ?? ''))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /** @param array<int,array{table:string,alias:string}> $joins */
