@@ -8,6 +8,7 @@ use ExcelleInsights\AiAssistant\Channels\WhatsAppChannel;
 use ExcelleInsights\AiAssistant\Contracts\ActionHandlerInterface;
 use ExcelleInsights\AiAssistant\Contracts\ChannelInterface;
 use ExcelleInsights\AiAssistant\Contracts\ChunkIndexInterface;
+use ExcelleInsights\AiAssistant\Contracts\CodeScannerInterface;
 use ExcelleInsights\AiAssistant\Contracts\ConversationStoreInterface;
 use ExcelleInsights\AiAssistant\Contracts\DocumentStoreInterface;
 use ExcelleInsights\AiAssistant\Contracts\LlmClientInterface;
@@ -25,6 +26,7 @@ use ExcelleInsights\AiAssistant\Services\ActionService;
 use ExcelleInsights\AiAssistant\Services\AssistantService;
 use ExcelleInsights\AiAssistant\Services\AuditService;
 use ExcelleInsights\AiAssistant\Services\ChartService;
+use ExcelleInsights\AiAssistant\Services\CodeIndexService;
 use ExcelleInsights\AiAssistant\Services\ConfigService;
 use ExcelleInsights\AiAssistant\Services\ConversationStore;
 use ExcelleInsights\AiAssistant\Services\DocumentService;
@@ -86,7 +88,7 @@ final class AssistantApi
         'conversations', 'messages', 'knowledge', 'schema', 'reference', 'training',
         'documents', 'document_chunks', 'exports', 'actions', 'action_runs',
         'notification_outbox', 'audit', 'usage_daily', 'settings', 'config',
-        'report_definitions', 'schedules', 'feedback', 'rate_limits', 'relations',
+        'report_definitions', 'schedules', 'feedback', 'rate_limits', 'relations', 'code_files',
     ];
     private const LEGACY_TABLES = ['sessions', 'queue'];
 
@@ -143,6 +145,7 @@ final class AssistantApi
             'schema' => $this->schema(),
             'knowledge' => $this->knowledge(),
             'relations' => $this->relations(),
+            'code' => $this->code(),
             'documents' => $this->documents(),
             'export' => $this->exports(),
             'actions' => $this->actions(),
@@ -158,8 +161,8 @@ final class AssistantApi
             'conversations' => $this->conversations(),
             'assistant' => $this->assistant(),
             default => throw new InvalidArgumentException(
-                'Unknown service "' . $name . '". Known: llm, policy, schema, knowledge, relations, documents, export, '
-                . 'actions, outbox, reports, schedules, feedback, usage, settings, configuration, audit, charts, '
+                'Unknown service "' . $name . '". Known: llm, policy, schema, knowledge, relations, code, documents, '
+                . 'export, actions, outbox, reports, schedules, feedback, usage, settings, configuration, audit, charts, '
                 . 'conversations, assistant.'
             ),
         };
@@ -711,6 +714,52 @@ final class AssistantApi
             }
 
             return ['relation' => $relation];
+        });
+    }
+
+    // ─── the CRM's own code ──────────────────────────────────────────────────
+
+    /**
+     * Read the application's code and remember what it runs.
+     *
+     * The scan starts at the navigation map, follows the pages it names and
+     * collects the queries they contain. It is incremental: a file that has not
+     * changed is not read again.
+     *
+     * @param array<string,mixed> $opts paths, max_files, max_size, max_depth
+     */
+    public function scanCode(int $tenantId, array $opts = []): array
+    {
+        return $this->wrap(function () use ($tenantId, $opts): array {
+            $result = $this->code()->scan($tenantId, $opts);
+            if (($result['error'] ?? '') !== '') {
+                return ['ok' => false, 'code' => 'unavailable', 'error' => $result['error'], 'scan' => $result];
+            }
+
+            return ['scan' => $result];
+        });
+    }
+
+    /** The files the index knows about. */
+    public function codeFiles(int $tenantId): array
+    {
+        return $this->wrap(fn (): array => ['items' => $this->code()->files($tenantId)]);
+    }
+
+    /**
+     * The queries the CRM already runs that match a question.
+     *
+     * @param array<string,mixed> $opts question, k
+     */
+    public function codeQueries(int $tenantId, array $opts = []): array
+    {
+        return $this->wrap(function () use ($tenantId, $opts): array {
+            $question = trim((string) ($opts['question'] ?? ''));
+            if ($question === '') {
+                return ['items' => []];
+            }
+
+            return ['items' => $this->code()->knownQueries($tenantId, $question, max(1, (int) ($opts['k'] ?? 5)))];
         });
     }
 
@@ -1486,6 +1535,19 @@ final class AssistantApi
             ));
     }
 
+    /** The CRM's own code, read once and remembered. */
+    private function code(): CodeIndexService
+    {
+        /** @var CodeIndexService */
+        return $this->made('code', fn () => $this->given('code', CodeIndexService::class)
+            ?? new CodeIndexService(
+                $this->pdo,
+                $this->knowledge(),
+                $this->given('code_scanner', CodeScannerInterface::class),
+                (array) ($this->options['code'] ?? []),
+            ));
+    }
+
     private function documents(): DocumentService
     {
         /** @var DocumentService */
@@ -1747,6 +1809,7 @@ final class AssistantApi
             policy: $this->policy(),
             hooks: array_merge($hooks, array_filter((array) ($this->services['hooks'] ?? []), 'is_callable')),
             options: (array) ($this->options['assistant'] ?? []),
+            code: $this->pdo !== null ? $this->code() : null,
         );
     }
 
@@ -2099,6 +2162,9 @@ final class AssistantApi
             'relation.discover' => fn (): array => $this->discoverRelations($tenant(), (array) ($input['options'] ?? [])),
             'relation.approve' => fn (): array => $this->approveRelation($tenant(), (int) ($input['id'] ?? 0)),
             'relation.reject' => fn (): array => $this->rejectRelation($tenant(), (int) ($input['id'] ?? 0)),
+            'code.scan' => fn (): array => $this->scanCode($tenant(), (array) ($input['options'] ?? [])),
+            'code.files' => fn (): array => $this->codeFiles($tenant()),
+            'code.queries' => fn (): array => $this->codeQueries($tenant(), (array) ($input['options'] ?? [])),
             'report.list' => fn (): array => $this->listReports($tenant(), isset($input['folder']) ? (string) $input['folder'] : null, $user),
             'report.run' => fn (): array => $this->runReport((string) ($input['id'] ?? ''), (array) ($input['params'] ?? []), $user),
             'schedule.create' => fn (): array => $this->createSchedule((array) $input),

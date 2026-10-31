@@ -259,6 +259,27 @@ final class Db
         return $stmt->rowCount();
     }
 
+    /** DELETE ... WHERE col = ? AND col2 = ? ; returns affected rows. */
+    public static function deleteWhere(PDO $pdo, string $table, array $where): int
+    {
+        $table = self::identifier($table);
+        $conditions = [];
+        $bind = [];
+        $i = 0;
+        foreach ($where as $column => $value) {
+            $column = self::identifier($column);
+            $param = ':w_' . $i++;
+            $conditions[] = "`{$column}` = {$param}";
+            $bind[$param] = $value;
+        }
+        if ($conditions === []) {
+            return 0;
+        }
+        $stmt = $pdo->prepare('DELETE FROM `' . $table . '` WHERE ' . implode(' AND ', $conditions));
+        $stmt->execute($bind);
+        return $stmt->rowCount();
+    }
+
     /**
      * SELECT rows with equality filters, optional LIKE filters, ordering and limit.
      * Keeps the tenancy scoping honest: callers always pass company_id in $where.

@@ -744,6 +744,7 @@ class KnowledgeService implements KnowledgeRetrieverInterface
             'lexical_score' => $lexical,
             'retrieval' => $this->retrieval,
             'fallback' => $fallback,
+            'metadata' => $meta,
             'updated_at' => (string) ($row['updated_at'] ?? ''),
         ];
         return SearchHit::make($data, SearchHit::render($data));
