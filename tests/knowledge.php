@@ -337,6 +337,43 @@ check('stats: active counted', $stats['active'] >= 3);
 same('stats: tenant scoped', true, $knowledge->stats($TENANT_B)['total'] < $stats['total']);
 check('stats: has the expected keys', isset($stats['by_status'], $stats['by_category'], $stats['last_updated_at']));
 
+// ─── paginate + clear: an admin list reads windows, never the whole corpus ─────
+$pdb = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+seedDatabase($pdb, 'aiknow');
+$paging = new KnowledgeService($pdb, $llm);
+foreach (range(1, 7) as $n) {
+    $paging->ingest($TENANT_A, 'Rule ' . $n, 'The rule number ' . $n . ' says payments are due weekly.', 'manual', $n % 2 === 0 ? 'pricing' : 'policy');
+}
+$paging->ingest($TENANT_B, 'Rule elsewhere', 'Payments are due weekly over there too.', 'manual', 'pricing');
+
+$page1 = $paging->paginate($TENANT_A, ['length' => 3, 'start' => 0]);
+same('paginate: the window is the size asked for', 3, count($page1['items']));
+same('paginate: total counts one company only', 7, $page1['total']);
+same('paginate: an unfiltered window matches the total', 7, $page1['filtered']);
+same('paginate: echoes the window back', 3, $page1['length']);
+check('paginate: never lists an embedding', !array_key_exists('embedding', $page1['items'][0]));
+
+$last = $paging->paginate($TENANT_A, ['length' => 3, 'start' => 6]);
+same('paginate: the final window holds the remainder', 1, count($last['items']));
+check('paginate: windows do not repeat rows', array_intersect(array_column($page1['items'], 'id'), array_column($last['items'], 'id')) === []);
+
+$found = $paging->paginate($TENANT_A, ['search' => 'pricing']);
+same('paginate: a search narrows the filtered count', 3, $found['filtered']);
+same('paginate: a search leaves the total alone', 7, $found['total']);
+same('paginate: a category filter counts', 4, $paging->paginate($TENANT_A, ['category' => 'policy'])['filtered']);
+
+$sorted = $paging->paginate($TENANT_A, ['length' => 7, 'sort' => 'title', 'direction' => 'asc']);
+same('paginate: sorts by the column asked for', 'Rule 1', (string) ($sorted['items'][0]['title'] ?? ''));
+$unsorted = $paging->paginate($TENANT_A, ['length' => 7, 'sort' => 'embedding']);
+same('paginate: an unlistable column still returns the page', 7, count($unsorted['items']));
+
+same('clear: a filter wipes one category', 3, $paging->clear($TENANT_A, ['category' => 'pricing']));
+same('clear: the rest of the corpus survives', 4, $paging->stats($TENANT_A)['total']);
+same('clear: another company is untouched', 1, $paging->stats($TENANT_B)['total']);
+same('clear: wipes the whole company', 4, $paging->clear($TENANT_A));
+same('clear: nothing is left', 0, $paging->stats($TENANT_A)['total']);
+same('clear: still leaves the other company alone', 1, $paging->stats($TENANT_B)['total']);
+
 // ─── the vector branch of hybrid retrieval ────────────────────────────────────
 $vdb = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 seedDatabase($vdb, 'aiknow');

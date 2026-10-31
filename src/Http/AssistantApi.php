@@ -587,6 +587,31 @@ final class AssistantApi
         return $this->wrap(fn (): array => ['items' => $this->knowledge()->list($tenantId, $limit)]);
     }
 
+    /**
+     * A page of the knowledge corpus, for an admin list that pages through it
+     * instead of loading every entry. `$options`: length, start, search, status,
+     * category, sort, direction.
+     *
+     * @param array<string,mixed> $options
+     */
+    public function pageKnowledge(int $tenantId, array $options = []): array
+    {
+        return $this->wrap(fn (): array => ['ok' => true] + $this->knowledge()->paginate($tenantId, $options));
+    }
+
+    /**
+     * Empty the corpus, or one filtered slice of it.
+     *
+     * @param array<string,mixed> $filters category, source, status
+     */
+    public function clearKnowledge(int $tenantId, array $filters = []): array
+    {
+        return $this->wrap(fn (): array => [
+            'ok' => true,
+            'deleted' => $this->knowledge()->clear($tenantId, $filters),
+        ]);
+    }
+
     public function getKnowledge(int $id, int $tenantId): array
     {
         return $this->wrap(function () use ($id, $tenantId): array {
