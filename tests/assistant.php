@@ -497,6 +497,23 @@ same('period: a month carries its own total', 50000.0, $months['2026-01'] ?? 0);
 same('period: two payments in one month are added up', 100000.0, $months['2026-03'] ?? 0);
 same('period: one row per month, not per payment', 2, count($byMonth->rows));
 
+// ─── a question for one figure stays one row ─────────────────────────────────
+// The money column is named by the question, and adding it as a dimension used
+// to turn the total into one row per amount.
+$figure = service(new ScriptedLlm(['intent' => 'data', 'plan' => [
+    'dataset' => 'project_payments', 'metrics' => ['amount'],
+]]))->ask('how much did we collect in total?', $user);
+same('figure: one row for one number', 1, count($figure->rows));
+same('figure: the number is the sum, not a page', 150000.0, (float) first_value($figure->rows));
+$perMonth = service(new ScriptedLlm(['intent' => 'data', 'plan' => [
+    'dataset' => 'project_payments', 'metrics' => ['amount'], 'dimensions' => ['month'],
+]]))->ask('how much did we collect each month?', $user);
+check('figure: a grouping the plan chose is kept', count($perMonth->rows) > 1, json_encode($perMonth->rows));
+$listed = service(new ScriptedLlm(['intent' => 'data', 'plan' => [
+    'dataset' => 'project_payments', 'metrics' => ['amount'],
+]]))->ask('show the payments with their amounts', $user);
+check('figure: a list question still gets its amount column', count($listed->rows) >= 1, json_encode($listed->rows));
+
 // ─── a period grouping without a measure still totals ───────────────────────
 $noMeasure = service(new ScriptedLlm(['intent' => 'data', 'plan' => [
     'dataset' => 'project_payments', 'dimensions' => ['month'],
