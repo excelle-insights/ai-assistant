@@ -633,9 +633,132 @@ final class AssistantService
     private function preparePlanShape(array $plan, string $question): array
     {
         $plan = $this->withDateFieldFixes($plan);
+        $plan = $this->withDimensionColumns($plan, $question);
+        $plan = $this->withMentionedFields($plan, $question);
         $plan = $this->withRelativePeriod($this->withDefaultShape($plan, $question), $question);
 
         return $this->withPeriodGuard($plan, $question);
+    }
+
+    /**
+     * "List payments with ... amount" sometimes comes back with the amount as
+     * a metric. On a list question the named column is a value per record, not
+     * a sum, and asking the compiler for it as a metric fails. Metrics that are
+     * really pack dimensions are therefore demoted for record lists only.
+     *
+     * @param array<string,mixed> $plan
+     * @return array<string,mixed>
+     */
+    private function withDimensionColumns(array $plan, string $question): array
+    {
+        if ($this->pack === null || !isset($plan['dataset']) || !is_string($plan['dataset'])) {
+            return $plan;
+        }
+        $metrics = (array) ($plan['metrics'] ?? []);
+        if ($metrics === []) {
+            return $plan;
+        }
+        if (preg_match('/\b(list|latest|recent|show|display|all|details?|records?)\b/i', $question) !== 1) {
+            return $plan;
+        }
+        if (preg_match('/\b(how many|how much|count|total|sum|average|per|by each)\b/i', $question) === 1) {
+            return $plan;
+        }
+        $dataset = (string) $plan['dataset'];
+        $moved = [];
+        $keep = [];
+        foreach ($metrics as $raw) {
+            $name = (string) $raw;
+            $dimension = $this->pack->dimension($dataset, $name);
+            if ($dimension !== null && $this->pack->metric($dataset, $name) === null) {
+                $moved[] = (string) $dimension['name'];
+                continue;
+            }
+            $keep[] = $name;
+        }
+        if ($moved === []) {
+            return $plan;
+        }
+        $plan['dimensions'] = array_values(array_unique(array_merge(
+            array_map('strval', (array) ($plan['dimensions'] ?? [])),
+            $moved
+        )));
+        if ($keep === []) {
+            unset($plan['metrics']);
+        } else {
+            $plan['metrics'] = $keep;
+        }
+
+        return $plan;
+    }
+
+    /**
+     * "List payments with receipt, project, amount and date" tends to come
+     * back as a title-only list because the model drops the measure and the
+     * date. Every pack field the question names is added to a record list, so
+     * the amount the user asked for is in the answer. Aggregates are left
+     * alone: an extra dimension would turn one number into rows.
+     *
+     * @param array<string,mixed> $plan
+     * @return array<string,mixed>
+     */
+    private function withMentionedFields(array $plan, string $question): array
+    {
+        if ($this->pack === null || !isset($plan['dataset']) || !is_string($plan['dataset'])) {
+            return $plan;
+        }
+        if ((array) ($plan['metrics'] ?? []) !== []) {
+            return $plan;
+        }
+        $dataset = $this->pack->dataset($plan['dataset']);
+        if ($dataset === null) {
+            return $plan;
+        }
+        $words = ' ' . trim((string) preg_replace('/[^a-z0-9_ ]+/u', ' ', strtolower($question)), ' ') . ' ';
+        $chosen = [];
+        foreach ((array) ($plan['dimensions'] ?? []) as $dimension) {
+            $chosen[] = (string) $dimension;
+        }
+        $named = [];
+        foreach ((array) ($dataset['dimensions'] ?? []) as $dimension) {
+            if (!is_array($dimension)) {
+                continue;
+            }
+            $name = (string) ($dimension['name'] ?? '');
+            if ($name === '' || in_array($name, $chosen, true)) {
+                continue;
+            }
+            $phrases = array_merge(
+                [$name, (string) ($dimension['label'] ?? '')],
+                array_map('strval', (array) ($dimension['aliases'] ?? []))
+            );
+            $hit = 0;
+            foreach ($phrases as $phrase) {
+                // Column aliases use snake_case; a question uses spaces.
+                $phrase = strtolower(trim((string) preg_replace('/[^a-z0-9_ ]+/u', ' ', str_replace('_', ' ', $phrase))));
+                if ($phrase === '' || strlen($phrase) < 3) {
+                    continue;
+                }
+                if (str_contains($words, ' ' . $phrase . ' ') || (strlen($phrase) >= 5 && str_contains($words, $phrase))) {
+                    $hit = max($hit, strlen($phrase));
+                }
+            }
+            if ($hit > 0) {
+                $named[] = [$hit, $name];
+            }
+        }
+        usort($named, static fn (array $a, array $b): int => $b[0] <=> $a[0]);
+        foreach ($named as [, $name]) {
+            if (count($chosen) >= 10) {
+                break;
+            }
+            $chosen[] = (string) $name;
+        }
+        if ($chosen !== []) {
+            $plan['dimensions'] = array_values(array_unique($chosen));
+        }
+
+        return $plan;
     }
 
     /**
@@ -734,9 +857,15 @@ final class AssistantService
         if ($from !== '' || $to !== '') {
             $plan['date_range'] = array_filter(['from' => $from, 'to' => $to]);
         }
+        // A dimension the pack declares for the date column is deliberate (a
+        // payments list must show when each payment happened), so it stays.
         foreach (['dimensions', 'metrics'] as $key) {
             if (isset($plan[$key]) && is_array($plan[$key])) {
-                $plan[$key] = array_values(array_filter($plan[$key], static fn ($field): bool => !$isDateField($field)));
+                $plan[$key] = array_values(array_filter(
+                    $plan[$key],
+                    fn ($field): bool => !$isDateField($field)
+                        || ($key === 'dimensions' && $this->pack?->dimension((string) $plan['dataset'], (string) $field) !== null)
+                ));
             }
         }
         if (isset($plan['order_by']) && is_array($plan['order_by'])) {
@@ -1492,7 +1621,8 @@ final class AssistantService
             . '. Use the column labels. Write money exactly as the values and labels give it: never add a currency'
             . ' symbol or a unit the table does not contain; long numbers may take thousands separators, but keep every digit.'
             . ' Never say the information is missing,'
-            . ' incomplete or unavailable, and never apologise, when the table has rows.',
+            . ' incomplete or unavailable, and never apologise, when the table has rows.'
+            . ' Never claim that every row shares a value ("all dated 25-08-2026") unless it is true; name a few rows instead.',
             $request->question,
             []
         );
