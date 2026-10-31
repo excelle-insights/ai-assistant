@@ -648,6 +648,60 @@ check('prompt: the built-in rules are not sent with an override', !str_contains(
 check('prompt: the vocabulary still travels with an override', str_contains($router, 'Vocabulary:'), $router);
 Config::set('domain.query_prompt', '');
 
+// ─── a key column is answered with the column that carries the name ──────────
+$pdo->exec('CREATE TABLE payments (id INTEGER PRIMARY KEY, company_id INTEGER, staff_id INTEGER, amount NUMERIC, paid_on TEXT)');
+$pdo->exec('CREATE TABLE staff (id INTEGER PRIMARY KEY, company_id INTEGER, name TEXT)');
+$pdo->prepare('INSERT INTO payments VALUES (?,?,?,?,?)')->execute([1, 7, 11, 500, '2026-10-01']);
+$pdo->prepare('INSERT INTO payments VALUES (?,?,?,?,?)')->execute([2, 7, 12, 900, '2026-10-02']);
+$pdo->prepare('INSERT INTO staff VALUES (?,?,?)')->execute([11, 7, 'Jane Wanjiru']);
+$pdo->prepare('INSERT INTO staff VALUES (?,?,?)')->execute([12, 7, 'Peter Otieno']);
+
+$staffPack = new DomainPack([[
+    'name' => 'crm',
+    'datasets' => [[
+        'name' => 'payments', 'table' => 'payments', 'label' => 'Payments', 'date_field' => 'paid_on',
+        'metrics' => [['name' => 'amount', 'label' => 'Amount collected', 'function' => 'sum', 'column' => 'payments.amount', 'format' => 'money']],
+        'dimensions' => [
+            ['name' => 'staff', 'label' => 'Staff id', 'column' => 'payments.staff_id', 'aliases' => ['staff_id']],
+            ['name' => 'staff_name', 'label' => 'Sales person', 'expr' => 'staff_member.name', 'aliases' => ['sales_person', 'seller']],
+        ],
+        'joins' => [['table' => 'staff', 'alias' => 'staff_member', 'on' => ['payments.staff_id' => 'staff_member.id']]],
+    ]],
+]], [], ['auto_derive' => false]);
+$staffCompiler = new QueryCompiler($staffPack, new SchemaPolicy(), [
+    'payments' => ['id', 'company_id', 'staff_id', 'amount', 'paid_on'],
+    'staff' => ['id', 'company_id', 'name'],
+]);
+$staffAi = new AssistantService(
+    llm: new ScriptedLlm(['intent' => 'data', 'plan' => [
+        'dataset' => 'payments', 'dimensions' => ['staff'], 'metrics' => ['amount'],
+        'order_by' => [['field' => 'amount', 'direction' => 'desc']],
+    ]]),
+    conversations: new ArrayStore(),
+    pack: $staffPack,
+    compiler: $staffCompiler,
+    charts: new ChartService(),
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+);
+$staffAnswer = $staffAi->ask('which sales person has the highest sales?', $user);
+check('labels: the key column is replaced by the name column', isset($staffAnswer->rows[0]['staff_name']), json_encode($staffAnswer->rows));
+same('labels: the answer names the person', 'Peter Otieno', (string) ($staffAnswer->rows[0]['staff_name'] ?? ''));
+same('labels: the answer carries the total', 900, (int) ($staffAnswer->rows[0]['amount'] ?? 0));
+
+$idAnswer = (new AssistantService(
+    llm: new ScriptedLlm(['intent' => 'data', 'plan' => [
+        'dataset' => 'payments', 'dimensions' => ['staff'], 'metrics' => ['amount'],
+    ]]),
+    conversations: new ArrayStore(),
+    pack: $staffPack,
+    compiler: $staffCompiler,
+    charts: new ChartService(),
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('show the staff id on each payment', $admin);
+check('labels: a question that asks for the id keeps the key', isset($idAnswer->rows[0]['staff']) && !isset($idAnswer->rows[0]['staff_name']), json_encode($idAnswer->rows));
+
+check('labels: the vocabulary shows the id column as an id', str_contains($staffPack->vocabulary(), 'Staff id'), $staffPack->vocabulary());
+
 Config::reset();
 echo "{$passed} passed, {$failed} failed\n";
 exit($failed === 0 ? 0 : 1);

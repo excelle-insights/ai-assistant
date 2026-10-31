@@ -212,6 +212,9 @@ final class DomainPack
     public function metricNames(string $dataset): array
     {
         $entry = $this->dataset($dataset);
+        if ($entry === null) {
+            return [];
+        }
         return array_values(array_map(static fn (array $m): string => (string) $m['name'], (array) ($entry['metrics'] ?? [])));
     }
 
@@ -219,7 +222,51 @@ final class DomainPack
     public function dimensionNames(string $dataset): array
     {
         $entry = $this->dataset($dataset);
+        if ($entry === null) {
+            return [];
+        }
         return array_values(array_map(static fn (array $d): string => (string) $d['name'], (array) ($entry['dimensions'] ?? [])));
+    }
+
+    /** True when a dimension holds a raw key ("user_id") instead of a value a person reads. */
+    public static function isIdDimension(array $dimension): bool
+    {
+        if (SchemaHints::isReferenceColumn((string) ($dimension['name'] ?? ''))) {
+            return true;
+        }
+        if (SchemaHints::isReferenceColumn((string) ($dimension['column'] ?? ''))) {
+            return true;
+        }
+        return preg_match('/\bids?\b/i', (string) ($dimension['label'] ?? '')) === 1;
+    }
+
+    /**
+     * The display column that belongs to a key column: "officer" resolves to
+     * "officer_name" when the dataset declares one. Null when the dataset
+     * carries the key and nothing else.
+     */
+    public function displaySibling(string $dataset, string $name): ?string
+    {
+        $entry = $this->dataset($dataset);
+        if ($entry === null) {
+            return null;
+        }
+        $base = (string) preg_replace('/_(id|uuid)$/i', '', $name);
+        foreach ([$base . '_name', $base . '_label', $base . '_title', $name . '_name'] as $candidate) {
+            foreach ((array) ($entry['dimensions'] ?? []) as $dimension) {
+                if (!is_array($dimension)) {
+                    continue;
+                }
+                if (self::key((string) ($dimension['name'] ?? '')) !== self::key($candidate)) {
+                    continue;
+                }
+                if (self::isIdDimension($dimension)) {
+                    continue;
+                }
+                return (string) $dimension['name'];
+            }
+        }
+        return null;
     }
 
     /** @return array<string,array<string,mixed>> */
@@ -319,8 +366,14 @@ final class DomainPack
             $name = (string) $dimension['name'];
             $aliases = array_values(array_filter(
                 array_map('strval', (array) ($dimension['aliases'] ?? [])),
-                static fn (string $alias): bool => $alias !== '' && strcasecmp($alias, $name) !== 0
+                static fn (string $alias): bool => $alias !== '' && self::key($alias) !== self::key($name)
             ));
+            // The label of a key column ("Staff id") and of the column that
+            // carries the name ("Sales person") tells the router which one to
+            // pick; without it the model reaches for the key.
+            if (self::wantsLabel($dimension)) {
+                array_unshift($aliases, (string) ($dimension['label'] ?? ''));
+            }
             // Showing a couple of aliases lets the router map a user's word
             // ("amount", "date") to the column that actually holds it.
             $dimensions[] = $aliases === []
@@ -352,6 +405,25 @@ final class DomainPack
             $line .= ' — ' . $description;
         }
         return $line;
+    }
+
+    /**
+     * A label earns a slot in the vocabulary when it carries the difference
+     * between a key and the value that replaces it.
+     *
+     * @param array<string,mixed> $dimension
+     */
+    private static function wantsLabel(array $dimension): bool
+    {
+        $name = (string) ($dimension['name'] ?? '');
+        $label = (string) ($dimension['label'] ?? '');
+        if ($label === '' || strcasecmp($label, $name) === 0) {
+            return false;
+        }
+        if (self::isIdDimension($dimension)) {
+            return true;
+        }
+        return preg_match('/_(name|label|title)$/i', $name) === 1;
     }
 
     /**

@@ -633,11 +633,54 @@ final class AssistantService
     private function preparePlanShape(array $plan, string $question): array
     {
         $plan = $this->withDateFieldFixes($plan);
+        $plan = $this->withDisplayLabels($plan, $question);
         $plan = $this->withDimensionColumns($plan, $question);
         $plan = $this->withMentionedFields($plan, $question);
         $plan = $this->withRelativePeriod($this->withDefaultShape($plan, $question), $question);
 
         return $this->withPeriodGuard($plan, $question);
+    }
+
+    /**
+     * Nobody asks for "officer 12"; they ask who the officer is. When the
+     * dataset carries a key column and the display column that belongs to it
+     * ("officer" and "officer_name"), the display column wins. A question that
+     * asks for the id keeps the key.
+     *
+     * @param array<string,mixed> $plan
+     * @return array<string,mixed>
+     */
+    private function withDisplayLabels(array $plan, string $question): array
+    {
+        if ($this->pack === null || !isset($plan['dataset']) || !is_string($plan['dataset'])) {
+            return $plan;
+        }
+        if (preg_match('/\bids?\b/i', $question) === 1) {
+            return $plan;
+        }
+        $dimensions = array_map('strval', (array) ($plan['dimensions'] ?? []));
+        if ($dimensions === []) {
+            return $plan;
+        }
+        $dataset = (string) $plan['dataset'];
+        $changed = false;
+        foreach ($dimensions as $index => $name) {
+            $dimension = $this->pack->dimension($dataset, $name);
+            if ($dimension === null || !DomainPack::isIdDimension($dimension)) {
+                continue;
+            }
+            $sibling = $this->pack->displaySibling($dataset, (string) ($dimension['name'] ?? $name));
+            if ($sibling === null || $sibling === $name) {
+                continue;
+            }
+            $dimensions[$index] = $sibling;
+            $changed = true;
+        }
+        if ($changed) {
+            $plan['dimensions'] = array_values($dimensions);
+        }
+
+        return $plan;
     }
 
     /**
@@ -728,6 +771,7 @@ final class AssistantService
             return $plan;
         }
         $words = ' ' . trim((string) preg_replace('/[^a-z0-9_ ]+/u', ' ', strtolower($question)), ' ') . ' ';
+        $wantsId = preg_match('/\bids?\b/i', $question) === 1;
         $chosen = [];
         foreach ((array) ($plan['dimensions'] ?? []) as $dimension) {
             $chosen[] = (string) $dimension;
@@ -739,6 +783,14 @@ final class AssistantService
             }
             $name = (string) ($dimension['name'] ?? '');
             if ($name === '' || in_array($name, $chosen, true)) {
+                continue;
+            }
+            // A key column ("Staff id") is not a field somebody asked for; the
+            // display column next to it carries the value.
+            if (!$wantsId
+                && DomainPack::isIdDimension($dimension)
+                && $this->pack->displaySibling((string) $plan['dataset'], $name) !== null
+            ) {
                 continue;
             }
             $phrases = array_merge(

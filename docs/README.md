@@ -29,6 +29,7 @@ depends on a specific messaging vendor.
 | 13 | [LLM providers](13-llm-providers.md) | OpenAI-compatible endpoints, local models, failure behaviour |
 | 14 | [Troubleshooting](14-troubleshooting.md) | Failures you will actually see, and what they mean |
 | 15 | [Bookings](15-bookings.md) | Package-owned bookings, booking numbers, per-contact recall, host actions |
+| 16 | [CRM intelligence roadmap](16-crm-intelligence-roadmap.md) | What the package already knows about a CRM, what is missing, and the phase plan for learning a CRM by itself |
 
 These guides are the current contract. `BLACKBOX_DECOUPLING_PROPOSAL.md` in the
 repository root is a historical design note; where the two disagree, `docs/`
