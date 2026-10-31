@@ -421,9 +421,20 @@ final class DomainPack
             }
             // Showing a couple of aliases lets the router map a user's word
             // ("amount", "date") to the column that actually holds it.
-            $dimensions[] = $aliases === []
+            $entry = $aliases === []
                 ? $name
                 : $name . '(' . implode('|', array_slice($aliases, 0, 3)) . ')';
+            // A code column shows the words it holds, in braces. The router then
+            // has a set to choose from instead of inventing "SOLD" for a column
+            // that stores "2".
+            $words = array_map(
+                static fn (array $value): string => (string) $value['label'],
+                array_slice((array) ($dimension['values'] ?? []), 0, 8)
+            );
+            if ($words !== []) {
+                $entry .= '{' . implode('|', $words) . '}';
+            }
+            $dimensions[] = $entry;
         }
         $line = $dataset['name'];
         $label = (string) ($dataset['label'] ?? '');
@@ -1058,9 +1069,71 @@ final class DomainPack
             // The spacing around a separator is part of it: " & " reads better
             // than "&" between two names.
             'separator' => (string) ($raw['separator'] ?? ''),
+            // The set a code column holds, with the words people use for it:
+            //   'values' => ['open' => '1', 'sold' => '2', 'blocked' => '5']
+            // A question says "sold units", the column holds "2". Declaring the
+            // set lets the router name the word and the compiler store the code,
+            // instead of filtering on a value the column never held.
+            'values' => self::valueList($raw['values'] ?? []),
             'aliases' => self::aliasList($raw['aliases'] ?? null, $name),
             'description' => trim((string) ($raw['description'] ?? '')),
         ];
+    }
+
+    /**
+     * A value set, in the order the host wrote it. A map gives word => stored
+     * value; a plain list means the column already holds readable values.
+     *
+     * @return array<int,array{label:string,value:string}>
+     */
+    private static function valueList(mixed $values): array
+    {
+        if (!is_array($values)) {
+            return [];
+        }
+        $out = [];
+        foreach ($values as $label => $value) {
+            if (is_int($label)) {
+                // ['PAID', 'NOTPAID'] — the word is the value.
+                $label = (string) $value;
+            }
+            $label = trim((string) $label);
+            $value = trim((string) $value);
+            if ($label === '' || $value === '') {
+                continue;
+            }
+            $out[] = ['label' => $label, 'value' => $value];
+        }
+        return $out;
+    }
+
+    /**
+     * The stored value a question's word stands for, or null when the dimension
+     * declares no set or the word is not in it. Both the words and the stored
+     * values are accepted, ignoring case and spacing, so "Not Paid", "notpaid"
+     * and "NOTPAID" all reach the value the column actually holds.
+     */
+    public static function matchValue(array $dimension, mixed $given): ?string
+    {
+        $values = (array) ($dimension['values'] ?? []);
+        if ($values === [] || $given === null || !is_scalar($given)) {
+            return null;
+        }
+        $wanted = self::key((string) $given);
+        if ($wanted === '') {
+            return null;
+        }
+        foreach ($values as $entry) {
+            if ($wanted === self::key((string) $entry['label'])) {
+                return (string) $entry['value'];
+            }
+        }
+        foreach ($values as $entry) {
+            if ($wanted === self::key((string) $entry['value'])) {
+                return (string) $entry['value'];
+            }
+        }
+        return null;
     }
 
     /** @param array<string,mixed> $raw @return array<string,mixed>|null */
