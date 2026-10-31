@@ -229,11 +229,40 @@ final class SchemaHints
         return 'text';
     }
 
+    /** An identifier column ("id", "user_id", "client_uuid") holds a key, not a value. */
+    public static function isReferenceColumn(string $column): bool
+    {
+        $c = strtolower(trim($column));
+        if ($c === '') {
+            return false;
+        }
+        if (str_contains($c, '.')) {
+            $parts = explode('.', $c);
+            $c = (string) end($parts);
+        }
+        return $c === 'id' || str_ends_with($c, '_id') || str_ends_with($c, '_uuid');
+    }
+
+    /**
+     * The thing a key column points at: "staff_id" → "staff", "officer" → "officer".
+     */
+    public static function referenceBase(string $column): string
+    {
+        $c = strtolower(trim($column));
+        if (str_contains($c, '.')) {
+            $parts = explode('.', $c);
+            $c = (string) end($parts);
+        }
+        $base = (string) preg_replace('/_(id|uuid)$/', '', $c);
+
+        return $base === 'id' || $base === 'uuid' ? '' : $base;
+    }
+
     /** Measures can be summed/averaged; identifiers and counts-of-things-that-are-not-metrics cannot. */
     public static function isMeasure(string $column, string $type): bool
     {
         $c = strtolower(trim($column));
-        if (str_ends_with($c, '_id') || $c === 'id' || str_ends_with($c, '_uuid')) {
+        if (self::isReferenceColumn($c)) {
             return false;
         }
         if (in_array(self::format($column, $type), ['money', 'percent', 'number'], true)) {

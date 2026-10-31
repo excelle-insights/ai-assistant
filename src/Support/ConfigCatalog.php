@@ -245,6 +245,20 @@ final class ConfigCatalog
             'column' => 'semantic_json', 'type' => 'int', 'default' => 12000, 'min' => 500,
             'label' => 'Vocabulary budget (characters)',
         ],
+        'relations.auto_verify' => [
+            'column' => 'semantic_json', 'type' => 'bool', 'default' => true,
+            'label' => 'Use well-evidenced relations on their own',
+            'help' => 'A relation whose key values match the target table is trusted without a review.',
+        ],
+        'relations.auto_verify_threshold' => [
+            'column' => 'semantic_json', 'type' => 'float', 'default' => 0.9, 'min' => 0.5, 'max' => 1.0,
+            'label' => 'How much overlap a relation needs',
+            'help' => 'Share of sampled key values that must exist on the other side (0.5 – 1.0).',
+        ],
+        'relations.sample_limit' => [
+            'column' => 'semantic_json', 'type' => 'int', 'default' => 20, 'min' => 2, 'max' => 200,
+            'label' => 'Key values checked per relation',
+        ],
         'metrics.auto' => [
             'column' => 'semantic_json', 'type' => 'bool', 'default' => true,
             'label' => 'Count rows per table',

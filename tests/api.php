@@ -212,6 +212,14 @@ function apiDatabase(): PDO
         updated_by TEXT, created_at TEXT, updated_at TEXT)');
     $pdo->exec('CREATE UNIQUE INDEX `' . tbl('config_company') . '` ON `' . tbl('config') . '` (company_id)');
 
+    // Same shape as 20261026120000_create_ai_assistant_relations_table.php.
+    $pdo->exec('CREATE TABLE `' . tbl('relations') . '` (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, company_id INTEGER DEFAULT 0,
+        source_table TEXT, source_column TEXT, target_table TEXT, target_column TEXT,
+        label_column TEXT, method TEXT, confidence REAL DEFAULT 0, status TEXT DEFAULT \'proposed\',
+        meta_json TEXT, updated_by TEXT, created_at TEXT, updated_at TEXT)');
+    $pdo->exec('CREATE UNIQUE INDEX `' . tbl('relation_source') . '` ON `' . tbl('relations') . '` (company_id, source_table, source_column)');
+
     // The host's own table, which is what the assistant is asked about.
     $pdo->exec('CREATE TABLE orders (
         id INTEGER PRIMARY KEY, company_id INTEGER, customer_id INTEGER, status TEXT,

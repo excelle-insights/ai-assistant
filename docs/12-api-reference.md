@@ -180,6 +180,22 @@ Every row is `$api->handle('<name>', $input)`.
 `file` accepts a `$_FILES` entry, an absolute path, raw text, base64 or an
 `UploadedFile` — the same normaliser for every upload action.
 
+### Relations — what a key column stands for
+
+| Action | Input keys | Returns |
+|---|---|---|
+| `relation.list` | tenant, `filter` | `items` |
+| `relation.discover` | tenant, `options` | `discovery` |
+| `relation.approve` | tenant, `id` | `relation` |
+| `relation.reject` | tenant, `id` | `relation` |
+
+`relation.discover` looks through the catalogue for key columns (`staff_id`,
+`client_uuid`, anything the catalogue calls an id) and proposes the table they
+point at. A proposal backed by strong evidence — a declared foreign key, or
+matching key values — is verified on its own and joins the semantic layer; a
+weaker one waits as `proposed` until it is approved. A rejected relation never
+comes back.
+
 ### Reports and schedules
 
 | Action | Input keys | Returns |
