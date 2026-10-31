@@ -316,7 +316,16 @@ final class DomainPack
         }
         $dimensions = [];
         foreach ((array) $dataset['dimensions'] as $dimension) {
-            $dimensions[] = (string) $dimension['name'];
+            $name = (string) $dimension['name'];
+            $aliases = array_values(array_filter(
+                array_map('strval', (array) ($dimension['aliases'] ?? [])),
+                static fn (string $alias): bool => $alias !== '' && strcasecmp($alias, $name) !== 0
+            ));
+            // Showing a couple of aliases lets the router map a user's word
+            // ("amount", "date") to the column that actually holds it.
+            $dimensions[] = $aliases === []
+                ? $name
+                : $name . '(' . implode('|', array_slice($aliases, 0, 3)) . ')';
         }
         $line = $dataset['name'];
         $label = (string) ($dataset['label'] ?? '');
