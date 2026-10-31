@@ -66,6 +66,7 @@ final class AssistantService
     private ?ReportService $reports;
     private ?CodeIndexService $code;
     private ?QueryLibraryService $queries;
+    private ?RuleService $rules;
     private SchemaPolicy $policy;
 
     /** @var array<string,callable> */
@@ -94,6 +95,7 @@ final class AssistantService
         array $options = [],
         ?CodeIndexService $code = null,
         ?QueryLibraryService $queries = null,
+        ?RuleService $rules = null,
     ) {
         $this->llm = $llm ?? LlmFactory::make();
         $this->conversations = $conversations;
@@ -107,6 +109,7 @@ final class AssistantService
         $this->policy = $policy ?? new SchemaPolicy();
         $this->code = $code;
         $this->queries = $queries;
+        $this->rules = $rules;
         $this->hooks = array_filter($hooks, 'is_callable');
         $this->model = (string) ($options['model'] ?? Config::string('llm.model', ''));
         $this->temperature = isset($options['temperature']) ? (float) $options['temperature'] : null;
@@ -369,6 +372,11 @@ final class AssistantService
             $lines[] = $reports;
         }
 
+        $rules = $this->knownRules($request);
+        if ($rules !== '') {
+            $lines[] = $rules;
+        }
+
         return implode("\n", $lines);
     }
 
@@ -405,6 +413,25 @@ final class AssistantService
         }
         try {
             return $this->queries->promptSection($request->user->tenantId, $request->question, 2);
+        } catch (\Throwable) {
+            return '';
+        }
+    }
+
+    /**
+     * The business rules this CRM follows, for the questions they cover.
+     *
+     * A verified rule is somebody's own statement of how the business works;
+     * it leads the prompt. A draft is only offered when nothing verified
+     * answers, because a rule nobody checked must not outrank one that was.
+     */
+    private function knownRules(AskRequest $request): string
+    {
+        if ($this->rules === null) {
+            return '';
+        }
+        try {
+            return $this->rules->promptSection($request->user->tenantId, $request->question, 3);
         } catch (\Throwable) {
             return '';
         }
@@ -1461,14 +1488,33 @@ final class AssistantService
             return $chunks;
         }
         $out = [];
+        $verified = [];
+        $drafts = [];
         foreach ($chunks as $chunk) {
             if (is_array($chunk) && (string) ($chunk['source'] ?? '') === 'code') {
+                continue;
+            }
+            $state = is_array($chunk)
+                ? (string) ((array) ($chunk['metadata'] ?? []))['verification'] ?? ''
+                : '';
+            if ($state === RuleService::VERIFICATION_VERIFIED) {
+                $verified[] = $chunk;
+                continue;
+            }
+            if ($state !== '') {
+                $drafts[] = $chunk;
                 continue;
             }
             $out[] = $chunk;
         }
 
-        return $out;
+        // A verified rule leads: it is the business's own statement of how the
+        // question is answered. A draft rule only speaks when nothing else does.
+        if ($verified !== []) {
+            return array_merge($verified, $out);
+        }
+
+        return $out !== [] ? $out : $drafts;
     }
 
     /**

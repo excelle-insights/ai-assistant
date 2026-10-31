@@ -38,6 +38,7 @@ use ExcelleInsights\AiAssistant\Services\QueryCompiler;
 use ExcelleInsights\AiAssistant\Services\QueryLibraryService;
 use ExcelleInsights\AiAssistant\Services\RelationService;
 use ExcelleInsights\AiAssistant\Services\ReportService;
+use ExcelleInsights\AiAssistant\Services\RuleService;
 use ExcelleInsights\AiAssistant\Services\SchemaService;
 use ExcelleInsights\AiAssistant\Services\SettingsService;
 use ExcelleInsights\AiAssistant\Services\SqlQueryRunner;
@@ -148,6 +149,7 @@ final class AssistantApi
             'relations' => $this->relations(),
             'code' => $this->code(),
             'queries' => $this->queries(),
+            'rules' => $this->rules(),
             'documents' => $this->documents(),
             'export' => $this->exports(),
             'actions' => $this->actions(),
@@ -164,8 +166,8 @@ final class AssistantApi
             'assistant' => $this->assistant(),
             default => throw new InvalidArgumentException(
                 'Unknown service "' . $name . '". Known: llm, policy, schema, knowledge, relations, code, queries, '
-                . 'documents, export, actions, outbox, reports, schedules, feedback, usage, settings, configuration, '
-                . 'audit, charts, conversations, assistant.'
+                . 'rules, documents, export, actions, outbox, reports, schedules, feedback, usage, settings, '
+                . 'configuration, audit, charts, conversations, assistant.'
             ),
         };
     }
@@ -829,6 +831,138 @@ final class AssistantApi
 
             return ['harvest' => $this->queries()->harvest($tenantId, $statements, $updatedBy)];
         });
+    }
+
+    // ─── the rules ────────────────────────────────────────────────────────────
+
+    /**
+     * The rules of this CRM, with their owner and their verification state.
+     *
+     * @param array<string,mixed> $filter verification, module, category, limit
+     */
+    public function listRules(int $tenantId, array $filter = []): array
+    {
+        return $this->wrap(fn (): array => ['items' => $this->rules()->list($tenantId, $filter)]);
+    }
+
+    /** One rule. */
+    public function getRule(int $tenantId, int $id): array
+    {
+        return $this->wrap(function () use ($tenantId, $id): array {
+            $rule = $this->rules()->find($id, $tenantId);
+            if ($rule === null) {
+                return ['ok' => false, 'code' => 'not_found', 'error' => 'No such rule for this company.'];
+            }
+
+            return ['rule' => $rule];
+        });
+    }
+
+    /**
+     * Store a rule: what the module is for, and the rule that decides a row.
+     *
+     * @param array<string,mixed> $rule
+     */
+    public function saveRule(int $tenantId, array $rule, ?string $updatedBy = null): array
+    {
+        return $this->wrap(fn (): array => ['rule' => $this->rules()->save($tenantId, $rule, $updatedBy)]);
+    }
+
+    /**
+     * Confirm a rule — or send it back to draft.
+     *
+     * A rule that carries an example question is checked against the data
+     * before it is confirmed: verification is a decision, and the decision needs
+     * the answer in front of the person making it.
+     *
+     * @param array<string,mixed> $input verification, owner, example_question, check
+     */
+    public function verifyRule(int $tenantId, int $id, array $input = [], ?UserContext $user = null): array
+    {
+        return $this->wrap(function () use ($tenantId, $id, $input, $user): array {
+            $rule = $this->rules()->find($id, $tenantId);
+            if ($rule === null) {
+                return ['ok' => false, 'code' => 'not_found', 'error' => 'No such rule for this company.'];
+            }
+
+            $question = trim((string) ($input['example_question'] ?? $rule['example_question']));
+            $check = [];
+            if ($question !== '' && ($input['check'] ?? true) !== false) {
+                $check = $this->checkRule($question, $user);
+            }
+
+            $stored = $this->rules()->verify($id, $tenantId, [
+                'verification' => (string) ($input['verification'] ?? RuleService::VERIFICATION_VERIFIED),
+                'owner' => trim((string) ($input['owner'] ?? '')),
+                'example_question' => $question,
+                'check' => $check,
+            ]);
+
+            return ['rule' => $stored, 'check' => $check];
+        });
+    }
+
+    /**
+     * Ask the rule's example question and report what came back.
+     *
+     * A rule that contradicts the data — the question returns nothing — is
+     * flagged, not quietly confirmed.
+     *
+     * @return array<string,mixed>
+     */
+    private function checkRule(string $question, ?UserContext $user): array
+    {
+        if ($user === null) {
+            return ['status' => 'unchecked', 'question' => $question];
+        }
+        try {
+            $answer = $this->assistant($user)->ask($question, $user);
+        } catch (Throwable $e) {
+            return ['status' => 'error', 'question' => $question, 'answer' => $e->getMessage()];
+        }
+
+        $rows = count($answer->rows);
+
+        return [
+            'status' => $rows > 0 ? 'ok' : 'empty',
+            'question' => $question,
+            'answer' => mb_substr($answer->text, 0, 600),
+            'rows' => $rows,
+            'checked_at' => date('Y-m-d H:i:s'),
+        ];
+    }
+
+    /** Forget a rule. */
+    public function deleteRule(int $tenantId, int $id): array
+    {
+        return $this->wrap(function () use ($tenantId, $id): array {
+            if (!$this->rules()->delete($id, $tenantId)) {
+                return ['ok' => false, 'code' => 'not_found', 'error' => 'No such rule for this company.'];
+            }
+
+            return ['deleted' => $id];
+        });
+    }
+
+    /** The starter sheet for a host's modules and operations screen. */
+    public function ruleSheetTemplate(): array
+    {
+        return $this->wrap(fn (): array => [
+            'csv' => $this->rules()->sheetTemplate(),
+            'filename' => 'ai-modules-template.csv',
+            'columns' => RuleService::SHEET_COLUMNS,
+        ]);
+    }
+
+    /**
+     * Import the modules and operations sheet.
+     *
+     * Re-importing updates the rules the sheet owns and leaves every other
+     * fact alone.
+     */
+    public function importRuleSheet(int $tenantId, string $csv, ?string $updatedBy = null): array
+    {
+        return $this->wrap(fn (): array => $this->rules()->importSheet($tenantId, $csv, $updatedBy));
     }
 
     // ─── schema learning ──────────────────────────────────────────────────────
@@ -1624,6 +1758,14 @@ final class AssistantApi
             ?? new QueryLibraryService($this->pdo, (array) ($this->options['queries'] ?? [])));
     }
 
+    /** The business rules of this CRM, owned and verified. */
+    private function rules(): RuleService
+    {
+        /** @var RuleService */
+        return $this->made('rules', fn () => $this->given('rules', RuleService::class)
+            ?? new RuleService($this->knowledge(), (array) ($this->options['rules'] ?? [])));
+    }
+
     private function documents(): DocumentService
     {
         /** @var DocumentService */
@@ -1887,6 +2029,7 @@ final class AssistantApi
             options: (array) ($this->options['assistant'] ?? []),
             code: $this->pdo !== null ? $this->code() : null,
             queries: $this->pdo !== null ? $this->queries() : null,
+            rules: $this->pdo !== null ? $this->rules() : null,
         );
     }
 
@@ -2252,6 +2395,21 @@ final class AssistantApi
             'query.delete' => fn (): array => $this->deleteQuery($tenant(), (int) ($input['id'] ?? 0)),
             'query.harvest' => fn (): array => $this->harvestQueries(
                 $tenant(),
+                isset($input['updated_by']) ? (string) $input['updated_by'] : $user?->userId
+            ),
+            'rule.list' => fn (): array => $this->listRules($tenant(), (array) ($input['filter'] ?? [])),
+            'rule.get' => fn (): array => $this->getRule($tenant(), (int) ($input['id'] ?? 0)),
+            'rule.save' => fn (): array => $this->saveRule(
+                $tenant(),
+                (array) ($input['rule'] ?? $input),
+                isset($input['updated_by']) ? (string) $input['updated_by'] : $user?->userId
+            ),
+            'rule.verify' => fn (): array => $this->verifyRule($tenant(), (int) ($input['id'] ?? 0), (array) $input, $user),
+            'rule.delete' => fn (): array => $this->deleteRule($tenant(), (int) ($input['id'] ?? 0)),
+            'rule.sheet-template' => fn (): array => $this->ruleSheetTemplate(),
+            'rule.sheet-import' => fn (): array => $this->importRuleSheet(
+                $tenant(),
+                self::asText($input['file'] ?? ''),
                 isset($input['updated_by']) ? (string) $input['updated_by'] : $user?->userId
             ),
             'report.list' => fn (): array => $this->listReports($tenant(), isset($input['folder']) ? (string) $input['folder'] : null, $user),
