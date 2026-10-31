@@ -45,6 +45,8 @@ config catalogue.
 | `runner` | callable | run a compiled plan (default: SQL against `$pdo`) |
 | `report_runner` | callable | execute a report definition |
 | `conversations` | `ConversationStore` | conversation persistence |
+| `code` | `CodeIndexService` | replace the code index |
+| `code_scanner` | `CodeScannerInterface` | read the CRM's code with your own scanner |
 | `document_store` | `DocumentStoreInterface` | document bytes |
 | `chunk_index` | `ChunkIndexInterface` | document chunk search |
 | `extractors` | array/class | document text extraction (PDF/DOCX/OCR) |
@@ -56,15 +58,15 @@ config catalogue.
 | `on_error` | callable | receives swallowed storage/LLM errors |
 
 `$options` keys: `schema`, `knowledge`, `documents`, `conversations`,
-`assistant`, `semantic`, `channel`, `settings` (e.g.
+`assistant`, `semantic`, `channel`, `code`, `settings` (e.g.
 `['enabled' => false]` to keep the DB settings layer out of `Config`).
 
 ```php
 $api->connection();      // ?PDO
 $api->service('audit');  // a built service: llm, policy, schema, knowledge,
-                         // documents, export, actions, outbox, reports, schedules,
-                         // feedback, usage, settings, configuration, audit, charts,
-                         // conversations, assistant
+                         // relations, code, documents, export, actions, outbox,
+                         // reports, schedules, feedback, usage, settings,
+                         // configuration, audit, charts, conversations, assistant
 $api::VERSION;           // package version string
 ```
 
@@ -196,6 +198,38 @@ matching key values — is verified on its own and joins the semantic layer; a
 weaker one waits as `proposed` until it is approved. A rejected relation never
 comes back.
 
+### The CRM's own code
+
+| Action | Input keys | Returns |
+|---|---|---|
+| `code.scan` | tenant, `options` | `scan` |
+| `code.files` | tenant | `items` |
+| `code.queries` | tenant, `options` | `items` |
+
+`code.scan` reads the application's source and remembers the queries it finds.
+The scan starts at the navigation map — the file that lists the modules — then
+follows the pages it names and the files they include. Each query is stored as
+knowledge with `source` = `code`, the tables it touches, its joins and its
+WHERE clauses, and a citation back to the file it came from.
+
+It is incremental: every file gets a fingerprint (content hash, size, modified
+time) in `{prefix}_code_files`, so a second scan only reads what changed, and a
+file that is deleted loses its entries instead of leaving orphans.
+
+The queries are read, never run. The pack stays the authority on what may be
+executed, and the host's table and column policy applies to every answer that
+uses what was learned.
+
+Settings (`operations_json`):
+
+| Path | Meaning |
+|---|---|
+| `code.scan_paths` | Absolute paths to the folders that hold the application code |
+| `code.max_files` | Files per scan (default 800) |
+| `code.max_size` | Largest file read, in bytes (default 1 MiB) |
+| `code.max_depth` | How deep to walk (default 8) |
+| `code.navigation` | Navigation map files, when they do not follow the usual names |
+
 ### Reports and schedules
 
 | Action | Input keys | Returns |
@@ -272,6 +306,11 @@ a public method — same envelope, no routing layer.
 `importSchemaDescriptions()`, `importSqlDump()`, `trainFromConnection()`,
 `train()`, `validateSql()`, `referenceValues()`, `forgetReferenceValues()`.
 
+### Relations and code
+
+`listRelations()`, `discoverRelations()`, `approveRelation()`,
+`rejectRelation()`, `scanCode()`, `codeFiles()`, `codeQueries()`.
+
 ### Reports and schedules
 
 `createReport()`, `updateReport()`, `deleteReport()`, `getReport()`,
@@ -317,9 +356,10 @@ $api->service('schedules')->nextRuns('0 8 * * *', 5, 'Africa/Nairobi');
 $api->service('configuration')->effective(3);
 ```
 
-Naming: `llm`, `policy`, `schema`, `knowledge`, `documents`, `export`,
-`actions`, `outbox`, `reports`, `schedules`, `feedback`, `usage`, `settings`,
-`configuration`, `audit`, `charts`, `conversations`, `assistant`.
+Naming: `llm`, `policy`, `schema`, `knowledge`, `relations`, `code`,
+`documents`, `export`, `actions`, `outbox`, `reports`, `schedules`, `feedback`,
+`usage`, `settings`, `configuration`, `audit`, `charts`, `conversations`,
+`assistant`.
 
 ---
 

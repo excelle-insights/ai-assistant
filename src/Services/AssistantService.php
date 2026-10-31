@@ -64,6 +64,7 @@ final class AssistantService
     private ?ChartService $charts;
     private ?ActionHandlerInterface $actions;
     private ?ReportService $reports;
+    private ?CodeIndexService $code;
     private SchemaPolicy $policy;
 
     /** @var array<string,callable> */
@@ -90,6 +91,7 @@ final class AssistantService
         ?SchemaPolicy $policy = null,
         array $hooks = [],
         array $options = [],
+        ?CodeIndexService $code = null,
     ) {
         $this->llm = $llm ?? LlmFactory::make();
         $this->conversations = $conversations;
@@ -101,6 +103,7 @@ final class AssistantService
         $this->actions = $actions;
         $this->reports = $reports;
         $this->policy = $policy ?? new SchemaPolicy();
+        $this->code = $code;
         $this->hooks = array_filter($hooks, 'is_callable');
         $this->model = (string) ($options['model'] ?? Config::string('llm.model', ''));
         $this->temperature = isset($options['temperature']) ? (float) $options['temperature'] : null;
@@ -249,7 +252,7 @@ final class AssistantService
             return ['intent' => 'smalltalk', 'plan' => [], 'by' => 'nothing_connected'];
         }
 
-        $messages = $this->convo($this->routerPrompt(), $request->question, $history);
+        $messages = $this->convo($this->routerPrompt($request), $request->question, $history);
         $json = self::jsonObject((string) ($this->chat($messages, 0.0)['content'] ?? ''));
         $intent = strtolower(trim((string) ($json['intent'] ?? '')));
         if (in_array($intent, self::INTENTS, true)) {
@@ -304,7 +307,7 @@ final class AssistantService
         return $this->hasDataPath() ? 'data' : 'smalltalk';
     }
 
-    private function routerPrompt(): string
+    private function routerPrompt(AskRequest $request): string
     {
         // A host can replace the routing instructions (own JSON dialect, extra
         // rules, another language). The vocabulary and custom instructions below
@@ -353,7 +356,32 @@ final class AssistantService
             $lines[] = $custom;
         }
 
+        $known = $this->knownCodeQueries($request);
+        if ($known !== '') {
+            $lines[] = $known;
+        }
+
         return implode("\n", $lines);
+    }
+
+    /**
+     * What the CRM's own code already runs, for the questions it covers.
+     *
+     * These are the application's real joins and real WHERE clauses — the
+     * ground truth a description cannot give. They are read, never run: the
+     * pack still decides what may be executed, and the host's table policy
+     * still applies to every answer.
+     */
+    private function knownCodeQueries(AskRequest $request): string
+    {
+        if ($this->code === null) {
+            return '';
+        }
+        try {
+            return $this->code->promptSection($request->user->tenantId, $request->question, 3);
+        } catch (\Throwable) {
+            return '';
+        }
     }
 
     /** Today in the host's timezone, phrased so the model cannot misread it. */
@@ -1151,7 +1179,7 @@ final class AssistantService
      */
     private function askForPlan(AskRequest $request, string $error): array
     {
-        $messages = $this->convo($this->routerPrompt(), $request->question, []);
+        $messages = $this->convo($this->routerPrompt($request), $request->question, []);
         if ($error !== '') {
             $messages[] = ['role' => 'assistant', 'content' => json_encode(['intent' => 'data', 'plan' => $request->option('plan', [])], JSON_UNESCAPED_UNICODE) ?: '{}'];
             $messages[] = ['role' => 'user', 'content' => 'That plan was rejected: ' . $error . ' Fix it using only vocabulary names and reply with JSON only.'];
@@ -1362,10 +1390,24 @@ final class AssistantService
             return [];
         }
         try {
-            return $this->knowledge->search($request->user->tenantId, $request->question, $this->knowledgeTopK);
+            $chunks = $this->knowledge->search($request->user->tenantId, $request->question, $this->knowledgeTopK);
         } catch (\Throwable) {
             return [];
         }
+        // The CRM's own queries are guidance for the router, not answers: a
+        // grounded answer must come from a fact a person wrote.
+        if (!is_array($chunks)) {
+            return $chunks;
+        }
+        $out = [];
+        foreach ($chunks as $chunk) {
+            if (is_array($chunk) && (string) ($chunk['source'] ?? '') === 'code') {
+                continue;
+            }
+            $out[] = $chunk;
+        }
+
+        return $out;
     }
 
     /**

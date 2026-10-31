@@ -220,6 +220,13 @@ function apiDatabase(): PDO
         meta_json TEXT, updated_by TEXT, created_at TEXT, updated_at TEXT)');
     $pdo->exec('CREATE UNIQUE INDEX `' . tbl('relation_source') . '` ON `' . tbl('relations') . '` (company_id, source_table, source_column)');
 
+    // Same shape as 20261026121000_create_ai_assistant_code_files_table.php.
+    $pdo->exec('CREATE TABLE `' . tbl('code_files') . '` (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, company_id INTEGER DEFAULT 0, path TEXT,
+        hash TEXT DEFAULT "", size INTEGER DEFAULT 0, mtime INTEGER DEFAULT 0, module TEXT DEFAULT "",
+        statements INTEGER DEFAULT 0, meta_json TEXT, updated_by TEXT, created_at TEXT, updated_at TEXT)');
+    $pdo->exec('CREATE UNIQUE INDEX `' . tbl('code_file_path') . '` ON `' . tbl('code_files') . '` (company_id, path)');
+
     // The host's own table, which is what the assistant is asked about.
     $pdo->exec('CREATE TABLE orders (
         id INTEGER PRIMARY KEY, company_id INTEGER, customer_id INTEGER, status TEXT,
@@ -983,6 +990,24 @@ okAnswer('handle: settings.put', $api->handle('settings.put', ['key' => 'k', 'va
 okAnswer('handle: conversation.list', $api->handle('conversation.list', ['tenant_id' => 7, 'user_id' => 'u1']));
 okAnswer('handle: whatsapp.inbound', $api->handle('whatsapp.inbound', ['payload' => $webhook]));
 okAnswer('handle: chart.build', $api->handle('chart.build', ['type' => 'line', 'data' => [['label' => 'a', 'value' => 1]]]));
+
+// ─── the code index ───────────────────────────────────────────────────────────
+
+$codeDir = sys_get_temp_dir() . '/ai-assistant-api-code-' . getmypid();
+@mkdir($codeDir, 0777, true);
+file_put_contents($codeDir . '/orders_list.php', "<?php\n\$sql = \"SELECT id, total_amount FROM orders WHERE company_id = 7\";\n");
+
+$codeScan = $api->handle('code.scan', ['tenant_id' => 7, 'options' => ['paths' => [$codeDir]]]);
+okAnswer('handle: code.scan', $codeScan);
+check('handle: code.scan found the query', ($codeScan['scan']['statements'] ?? 0) >= 1, json_encode($codeScan));
+okAnswer('handle: code.files', $api->handle('code.files', ['tenant_id' => 7]));
+$codeQueries = $api->handle('code.queries', ['tenant_id' => 7, 'options' => ['question' => 'orders']]);
+okAnswer('handle: code.queries', $codeQueries);
+check('handle: code.queries found the query', ($codeQueries['items'] ?? []) !== [], json_encode($codeQueries));
+
+@unlink($codeDir . '/orders_list.php');
+@rmdir($codeDir);
+
 $noUser = $api->handle('export.create', ['data' => $rows, 'format' => 'csv']);
 badAnswer('handle: needs a user where one is required', $noUser, 'user');
 

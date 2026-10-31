@@ -35,7 +35,7 @@ real; nothing here is aspirational fiction.
 
 | Gap | Consequence today | Phase |
 |---|---|---|
-| The host's **source code** is never read | business rules that only live in PHP (how "paid" is decided, how a balance is computed) are invisible to the assistant | P2 |
+| The host's **source code** is never read | business rules that only live in PHP (how "paid" is decided, how a balance is computed) are invisible to the assistant | P2 ✅ |
 | There is no **query library** | the assistant re-derives a calculation the CRM already has a proven report for | P3 |
 | A key column (`staff_id`) becomes a name only when a pack declares the sibling | on an uncurated CRM the answer says "12" instead of "Jane Wanjiru" | P1 ✅ |
 | There is no **onboarding flow** | installing into a new CRM still needs a human to write the pack | P5 |
@@ -151,7 +151,7 @@ rows, and every returned name can be traced to a relation the admin approved.
 
 ---
 
-### P2 — The CRM's own code becomes searchable
+### P2 — The CRM's own code becomes searchable ✅ done
 
 *Goal:* the assistant understands how the CRM computes things, not just what
 its tables look like.
@@ -215,6 +215,35 @@ code changes slowly, so the index is persistent and incremental:
 numbers as that report, and the answer cites the host file it learned from. A
 second scan of an unchanged CRM ingests nothing new and finishes without
 touching the LLM.
+
+*What shipped:*
+
+- `src/Contracts/CodeScannerInterface.php` — a host whose code is not PHP, or
+  which wants to hide part of it, supplies its own scanner.
+- `src/Services/PhpCodeScanner.php` — reads the navigation map first (the
+  sidebar), turns each menu entry into a module with its label, follows the
+  page it names and the files that page includes, and only then falls back to a
+  bounded directory sweep. It extracts the SQL literals, the tables, the joins
+  and the WHERE fragments, and the function each one sits in.
+- `src/Services/CodeIndexService.php` — the incremental index. Every file gets a
+  fingerprint in `{prefix}_code_files`; a second scan reads only what changed,
+  and a deleted file loses its entries instead of leaving orphans.
+- Each statement is stored as knowledge with `source` = `code`, category
+  `query`, the tables it touches and a citation back to the host file.
+- The router prompt gains a "Queries this CRM already runs" section with the
+  matching queries, their rules and their joins, so the plan can follow a proven
+  pattern instead of guessing. The section says plainly: read them, never run
+  them.
+- Extracted SQL never reaches a grounded answer: code facts guide the plan, and
+  the pack stays the authority on what may be executed.
+- `AssistantApi` actions `code.scan` / `code.files` / `code.queries`, and the
+  settings `code.scan_paths`, `code.max_files`, `code.max_size`,
+  `code.max_depth`, `code.navigation`.
+
+*Acceptance:* `tests/code.php` — 24 checks over a fixture application: the
+modules come from the navigation map, the queries become knowledge with their
+tables and their file, a second scan stores nothing, a changed file is read
+again, a deleted file is forgotten, and the router prompt carries the rules.
 
 ---
 

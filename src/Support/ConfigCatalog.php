@@ -717,6 +717,31 @@ final class ConfigCatalog
             'label' => 'Failures before disabling',
             'help' => '0 = never disable.',
         ],
+
+        // ── The CRM's own code ───────────────────────────────────────────────
+        'code.scan_paths' => [
+            'column' => 'operations_json', 'type' => 'list', 'default' => [],
+            'label' => 'Folders to scan',
+            'help' => 'Absolute paths to the folders that hold the application code, '
+                . 'for example /var/www/app/admin. Empty = the code index stays empty.',
+        ],
+        'code.max_files' => [
+            'column' => 'operations_json', 'type' => 'int', 'default' => 800, 'min' => 1,
+            'label' => 'Files per scan',
+        ],
+        'code.max_size' => [
+            'column' => 'operations_json', 'type' => 'int', 'default' => 1048576, 'min' => 1024,
+            'label' => 'Largest file read (bytes)',
+        ],
+        'code.max_depth' => [
+            'column' => 'operations_json', 'type' => 'int', 'default' => 8, 'min' => 1,
+            'label' => 'How deep to walk',
+        ],
+        'code.navigation' => [
+            'column' => 'operations_json', 'type' => 'list', 'default' => [],
+            'label' => 'Navigation map files',
+            'help' => 'Files that list the modules, when they do not follow the usual names.',
+        ],
     ];
 
     public static function has(string $path): bool
