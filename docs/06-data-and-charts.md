@@ -157,6 +157,28 @@ resolve in `timezone`.
 Aggregation is decided by the plan, not by luck: metrics present → `GROUP BY` the
 dimensions; no metrics → a detail query that keeps every row.
 
+### A dimension on the many side of a relation
+
+A unit can have two buyers, a receipt can cover two lines. A plain join of that
+relation turns one receipt into two receipts, and every total over it counts the
+money twice. Say so in the pack and the far side is folded into one value:
+
+```php
+'dimensions' => [[
+    'name'      => 'client_name',
+    'collect'   => 'group_concat',   // fold the far side into one value
+    'separator' => ' & ',            // how the values are put together
+    'expr'      => 'clients.name',
+    'via'       => ['unit_clients', 'clients'],
+]],
+```
+
+The relation is then compiled into one derived table, so the base table keeps its
+own grain: one receipt stays one receipt, the money is counted once, and the cell
+reads "Albert Ouma Wanga & JUDITH OMBUOR". `collect` accepts `group_concat` (or
+`true`); the separator is plain text only, and it is rejected if it carries
+anything else.
+
 ## Analysis you can ask for
 
 All of these are the same mechanism, and they work because your pack (or the derived
@@ -343,7 +365,7 @@ Honest list, so you do not design around something that is not there:
 |---------|-------|-----|
 | "I can't answer that" / `grounded:false`, `routed_by:'nothing_connected'` | no dataset matches the words | `schema.sync` + descriptions; add a pack with the words your users say (`aliases`) |
 | Wrong metric chosen | two metrics share a name-ish alias | tighten `aliases`; `semantic.max_datasets` too high invites collisions |
-| Numbers look doubled | a `joins` fan-out: one order, many lines | measure on the table whose grain matches, or `count_distinct` |
+| Numbers look doubled | a `joins` fan-out: one order, many lines | measure on the table whose grain matches, or `count_distinct`; a dimension on the many side can be `collect`ed instead |
 | `Unsupported filter operator "not equals" on "status"` | the model or your UI used prose | map to the operator list; `!=`/`not_in` |
 | Every answer is a table | `charts.table_above_rows` (8) with wide results, or > `bar_max_categories` | reduce dimensions in the plan; raise the guard if the data is genuinely dense |
 | Tenant data leaking between companies | `require_tenant_scope=false` **and** a resolver that returns `null` | turn it back on; verify `applied_filters` shows the tenant |

@@ -122,7 +122,7 @@ final class QueryCompiler
 
         $hidden = $this->hiddenFor($table, $scope);
         $bind = [];
-        $joins = $this->joinsFor($dataset, $plan, $table);
+        $joins = $this->joinsFor($dataset, $plan, $table, $hidden);
 
         $aggregate = $plan->isAggregate();
         $select = [];
@@ -217,7 +217,7 @@ final class QueryCompiler
         return [
             'sql' => $sql,
             'bind' => $bind,
-            'tables' => array_values(array_unique(array_merge([$table], array_column($joins, 'table')))),
+            'tables' => $this->tablesRead($table, $joins),
             'columns' => array_values(array_unique($columns)),
             // How the UI should render each selected column (money, percent,
             // date…). Kept beside the SQL so hosts never guess from the name.
@@ -305,9 +305,10 @@ final class QueryCompiler
      * "customers.name", or a dimension declaring "via: customers", pulls one in.
      *
      * @param array<string,mixed> $dataset
+     * @param string[] $hidden
      * @return array<int,array{table:string,alias:string,sql:string}>
      */
-    private function joinsFor(array $dataset, QueryPlan $plan, string $table): array
+    private function joinsFor(array $dataset, QueryPlan $plan, string $table, array $hidden = []): array
     {
         $declared = [];
         foreach ((array) ($dataset['joins'] ?? []) as $join) {
@@ -334,13 +335,34 @@ final class QueryCompiler
         }
 
         $wanted = array_merge($plan->dimensions, $plan->metrics, array_column($plan->filters, 'field'), array_column($plan->orderBy, 'field'));
+
+        // A dimension on the many side owns its chain: the chain is compiled
+        // into one derived table, so its tables are not joined into the query
+        // itself and the rows it is read with are not multiplied.
+        $collected = [];
+        $collectedNames = [];
+        foreach ($this->dimensionsOf($dataset) as $dimension) {
+            if ((string) ($dimension['collect'] ?? '') === '' || !$this->isWanted($dimension, $wanted)) {
+                continue;
+            }
+            $entry = $this->collectedJoin($dimension, $table, $declared, $hidden);
+            if ($entry === null) {
+                continue;
+            }
+            $collected[] = $entry;
+            $collectedNames[(string) ($dimension['name'] ?? '')] = true;
+        }
+
         $needed = [];
-        foreach ($this->referencedTables($dataset, $wanted) as $key) {
+        foreach ($this->referencedTables($dataset, $wanted, $collectedNames) as $key) {
             if (isset($declared[$key]) && $key !== DomainPack::key($table)) {
                 $needed[$key] = $declared[$key];
             }
         }
         foreach ($this->dimensionsOf($dataset) as $dimension) {
+            if (isset($collectedNames[(string) ($dimension['name'] ?? '')])) {
+                continue;
+            }
             foreach ($this->viaKeys($dimension) as $via) {
                 if ($via !== DomainPack::key($table) && isset($declared[$via])) {
                     foreach ($wanted as $name) {
@@ -378,34 +400,230 @@ final class QueryCompiler
                 'sql' => $join['type'] . ' JOIN `' . $join['table'] . '` AS `' . $join['alias'] . '` ON ' . implode(' AND ', $conditions),
             ];
         }
+        foreach ($collected as $entry) {
+            $aliasKey = DomainPack::key($entry['alias']);
+            if (isset($seen[$aliasKey])) {
+                continue;
+            }
+            $seen[$aliasKey] = true;
+            $out[] = $entry;
+        }
         return array_values($out);
+    }
+
+    /**
+     * A join for a dimension that sits on the many side of a relation.
+     *
+     * The plain joins of such a chain multiply the rows they are read with:
+     * one receipt on a unit with two buyers becomes two receipts, and every
+     * total over it counts the money twice. The chain is therefore compiled
+     * into one derived table that folds the far side into a single value.
+     *
+     * @param array<string,mixed> $dimension
+     * @param array<string,array<string,mixed>> $declared
+     * @param string[] $hidden
+     * @return array<string,mixed>|null
+     */
+    private function collectedJoin(array $dimension, string $table, array $declared, array $hidden): ?array
+    {
+        $chain = [];
+        foreach ($this->viaKeys($dimension) as $key) {
+            if (!isset($declared[$key])) {
+                continue;
+            }
+            $entry = $declared[$key];
+            if (!in_array($entry, $chain, true)) {
+                $chain[] = $entry;
+            }
+        }
+        if ($chain === []) {
+            return null;
+        }
+
+        $collector = $chain[0];
+        if (!$this->policy->isTableAllowed((string) $collector['table'])) {
+            throw new \InvalidArgumentException('The joined table "' . $collector['table'] . '" is not readable (table policy).');
+        }
+        $key = '';
+        $local = '';
+        foreach ((array) ($collector['on'] ?? []) as $left => $right) {
+            $key = self::columnOf((string) $right);
+            $local = (string) $left;
+            break;
+        }
+        if ($key === '' || $local === '') {
+            return null;
+        }
+
+        // The hops after the collector. Each one must hang off a table the
+        // chain already has: a hop back to the table the value is read with
+        // would mean the far side is not one value.
+        $inner = [];
+        $known = [DomainPack::key((string) $collector['alias']) => true, DomainPack::key((string) $collector['table']) => true];
+        foreach (array_slice($chain, 1) as $join) {
+            foreach (array_keys((array) ($join['on'] ?? [])) as $left) {
+                $prefix = $this->prefixOf((string) $left);
+                if ($prefix !== '' && !isset($known[DomainPack::key($prefix)])) {
+                    throw new \InvalidArgumentException('A collected relation may not reach back to the table it is read from: "' . (string) $left . '".');
+                }
+            }
+            $inner[] = $join;
+            $known[DomainPack::key((string) $join['alias'])] = true;
+            $known[DomainPack::key((string) $join['table'])] = true;
+        }
+
+        $innerSql = [];
+        $innerJoins = [['table' => (string) $collector['table'], 'alias' => (string) $collector['alias']]];
+        foreach ($inner as $join) {
+            if (!$this->policy->isTableAllowed((string) $join['table'])) {
+                throw new \InvalidArgumentException('The joined table "' . $join['table'] . '" is not readable (table policy).');
+            }
+            $conditions = [];
+            foreach ((array) ($join['on'] ?? []) as $left => $right) {
+                $conditions[] = '`' . $this->joinedColumn((string) $left, array_merge([$collector], $inner), (string) $collector['alias']) . '` = `' . $join['alias'] . '`.`' . Db::identifier(self::columnOf((string) $right)) . '`';
+            }
+            if ($conditions === []) {
+                continue;
+            }
+            $innerSql[] = $join['type'] . ' JOIN `' . $join['table'] . '` AS `' . $join['alias'] . '` ON ' . implode(' AND ', $conditions);
+            $innerJoins[] = ['table' => (string) $join['table'], 'alias' => (string) $join['alias']];
+        }
+
+        $expr = trim((string) ($dimension['expr'] ?? ''));
+        $column = trim((string) ($dimension['column'] ?? ''));
+        // A dimension expression is read the way every other dimension is
+        // read: the pack's own words, not the raw column of the base table.
+        $value = $expr !== ''
+            ? $this->expressionSql($expr, (string) $collector['table'], $innerJoins, [])
+            : ($column !== '' ? $this->columnSql($column, (string) $collector['table'], $innerJoins, []) : '');
+        if ($value === '') {
+            return null;
+        }
+
+        $name = $this->alias((string) ($dimension['name'] ?? ''));
+        $alias = Db::identifier($name . '_collected');
+        $separator = $this->separator((string) ($dimension['separator'] ?? ''));
+
+        $sql = 'LEFT JOIN (SELECT `' . $collector['alias'] . '`.`' . Db::identifier($key) . '` AS `__key`, '
+            . 'GROUP_CONCAT(DISTINCT ' . $value . " SEPARATOR '" . $separator . "') AS `" . $name . '`'
+            . ' FROM `' . $collector['table'] . '` AS `' . $collector['alias'] . '`'
+            . ($innerSql === [] ? '' : ' ' . implode(' ', $innerSql))
+            . ' GROUP BY `' . $collector['alias'] . '`.`' . Db::identifier($key) . '`'
+            . ') AS `' . $alias . '` ON `' . $this->qualify($local, $table) . '` = `' . $alias . '`.`__key`';
+
+        return [
+            'table' => (string) $collector['table'],
+            'alias' => $alias,
+            'sql' => $sql,
+            'collect' => (string) ($dimension['name'] ?? ''),
+            'column' => $name,
+            'tables' => array_values(array_unique(array_map(
+                static fn (array $join): string => (string) $join['table'],
+                $innerJoins
+            ))),
+        ];
+    }
+
+    /** True when the plan asks for this dimension. */
+    private function isWanted(array $dimension, array $wanted): bool
+    {
+        foreach ($wanted as $name) {
+            if (self::same((string) ($dimension['name'] ?? ''), (string) $name)
+                || self::same((string) ($dimension['label'] ?? ''), (string) $name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The separator between collected values; only plain text is allowed. */
+    private function separator(string $separator): string
+    {
+        if (trim($separator) === '') {
+            return ', ';
+        }
+        if (preg_match('/^[A-Za-z0-9 ,.&_\-]{1,20}$/', $separator) !== 1) {
+            throw new \InvalidArgumentException('Unsafe separator in the domain pack: "' . $separator . '".');
+        }
+        return $separator;
+    }
+
+    /** "orders.customer_id" → "orders"; a bare name has no prefix. */
+    private function prefixOf(string $reference): string
+    {
+        $clean = str_replace('`', '', trim($reference));
+        if (!str_contains($clean, '.')) {
+            return '';
+        }
+        [$prefix] = preg_split('/\s*\.\s*/', $clean, 2) ?: [];
+        return trim((string) $prefix);
+    }
+
+    /** The alias a table is joined under, so a prefix written either way resolves. */
+    private function aliasOf(string $prefix, array $joins): string
+    {
+        $key = DomainPack::key($prefix);
+        foreach ($joins as $join) {
+            if (DomainPack::key((string) $join['alias']) === $key) {
+                return (string) $join['alias'];
+            }
+        }
+        foreach ($joins as $join) {
+            if (DomainPack::key((string) $join['table']) === $key) {
+                return (string) $join['alias'];
+            }
+        }
+        return $prefix;
+    }
+
+    /** "orders.customer_id" → "`orders`.`customer_id`", under the alias it is joined as. */
+    private function joinedColumn(string $reference, array $joins, string $fallback): string
+    {
+        $clean = str_replace('`', '', trim($reference));
+        if (!str_contains($clean, '.')) {
+            return Db::identifier($fallback) . '`.`' . Db::identifier($clean);
+        }
+        [$prefix, $column] = preg_split('/\s*\.\s*/', $clean, 2) ?: [$fallback, $clean];
+        return Db::identifier($this->aliasOf((string) $prefix, $joins)) . '`.`' . Db::identifier((string) $column);
+    }
+
+    /** Every table the query reads, including the ones inside a collected join. */
+    private function tablesRead(string $table, array $joins): array
+    {
+        $tables = [$table];
+        foreach ($joins as $join) {
+            $tables[] = (string) $join['table'];
+            foreach ((array) ($join['tables'] ?? []) as $extra) {
+                $tables[] = (string) $extra;
+            }
+        }
+        return array_values(array_unique($tables));
     }
 
     /**
      * @param array<string,mixed> $dataset
      * @param array<int,mixed> $names
+     * @param array<string,bool> $collected dimensions that read their value inside their own relation
      * @return string[] join keys those names reference
      */
-    private function referencedTables(array $dataset, array $names): array
+    private function referencedTables(array $dataset, array $names, array $collected = []): array
     {
         $keys = [];
         foreach ($names as $raw) {
             $dimension = $this->pack->dimension((string) $dataset['name'], (string) $raw);
             $metric = $this->pack->metric((string) $dataset['name'], (string) $raw);
-            foreach ([$dimension, $metric] as $entry) {
-                if ($entry === null) {
-                    continue;
-                }
-                foreach (['column', 'expr'] as $field) {
-                    $text = (string) ($entry[$field] ?? '');
-                    if ($text !== '' && str_contains($text, '.')) {
-                        if (preg_match_all('/`?([a-z0-9_]+)`?\s*\.\s*`?[a-z0-9_]+`?/i', $text, $matches) > 0) {
-                            foreach ($matches[1] as $prefix) {
-                                $keys[] = DomainPack::key((string) $prefix);
-                            }
-                        }
-                    }
-                }
+            // A collected dimension reads its value inside its own relation:
+            // the tables it names are joined there, not into this query.
+            $inside = $dimension !== null && isset($collected[(string) $dimension['name']]);
+
+            foreach ($this->prefixesOf($metric) as $prefix) {
+                $keys[] = $prefix;
+            }
+            if ($inside) {
+                continue;
+            }
+            foreach ($this->prefixesOf($dimension) as $prefix) {
+                $keys[] = $prefix;
             }
             if ($dimension !== null) {
                 foreach ($this->viaKeys($dimension) as $via) {
@@ -414,6 +632,32 @@ final class QueryCompiler
             }
         }
         return array_values(array_unique($keys));
+    }
+
+    /**
+     * The tables a field names in its column or expression.
+     *
+     * @param array<string,mixed>|null $entry
+     * @return string[]
+     */
+    private function prefixesOf(?array $entry): array
+    {
+        if ($entry === null) {
+            return [];
+        }
+        $keys = [];
+        foreach (['column', 'expr'] as $field) {
+            $text = (string) ($entry[$field] ?? '');
+            if ($text === '' || !str_contains($text, '.')) {
+                continue;
+            }
+            if (preg_match_all('/`?([a-z0-9_]+)`?\s*\.\s*`?[a-z0-9_]+`?/i', $text, $matches) > 0) {
+                foreach ($matches[1] as $prefix) {
+                    $keys[] = DomainPack::key((string) $prefix);
+                }
+            }
+        }
+        return $keys;
     }
 
     /**
@@ -510,6 +754,15 @@ final class QueryCompiler
     /** @param array<int,array{table:string,alias:string}> $joins */
     private function dimensionSql(array $dimension, string $table, array $joins): string
     {
+        // A collected dimension reads the folded value, not the rows it was
+        // folded from.
+        if ((string) ($dimension['collect'] ?? '') !== '') {
+            foreach ($joins as $join) {
+                if ((string) ($join['collect'] ?? '') === (string) ($dimension['name'] ?? '')) {
+                    return '`' . $join['alias'] . '`.`' . $join['column'] . '`';
+                }
+            }
+        }
         $expr = trim((string) ($dimension['expr'] ?? ''));
         if ($expr !== '') {
             return $this->expressionSql($expr, $table, $joins, []);

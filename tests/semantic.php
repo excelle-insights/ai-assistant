@@ -402,6 +402,90 @@ $grouped = (new QueryCompiler($underscored, new SchemaPolicy(), $tableColumns))
     ->compile(QueryPlan::fromArray(['dataset' => 'order_items', 'metrics' => ['total'], 'dimensions' => ['month']]), $scoped);
 check('expression: an underscored table name resolves', str_contains($grouped['sql'], 'order_items.created_at') && str_contains($grouped['sql'], 'SUM(order_items.total_amount)'), $grouped['sql']);
 
+// ─── A dimension on the many side of a relation ───────────────────────────────
+// One unit may have two buyers. The plain join would turn one receipt into two
+// receipts and count the money twice, so the far side is folded into one value.
+$manyPack = new DomainPack([[
+    'name' => 'x',
+    'datasets' => [[
+        'name' => 'receipts', 'table' => 'receipts',
+        'metrics' => [['name' => 'total', 'function' => 'sum', 'column' => 'receipts.amount']],
+        'dimensions' => [
+            ['name' => 'client_name', 'collect' => 'group_concat', 'separator' => ' & ', 'expr' => 'clients.name', 'via' => ['unit_clients', 'clients']],
+            ['name' => 'amount', 'column' => 'receipts.amount'],
+        ],
+        'joins' => [
+            ['table' => 'unit_clients', 'alias' => 'unit_clients', 'on' => ['receipts.unit_id' => 'unit_clients.unit_id']],
+            ['table' => 'clients', 'alias' => 'clients', 'on' => ['unit_clients.client_id' => 'clients.id']],
+        ],
+    ]],
+]], $catalog, ['auto_derive' => false]);
+$manyColumns = [
+    'receipts' => ['id', 'unit_id', 'amount'],
+    'unit_clients' => ['unit_id', 'client_id'],
+    'clients' => ['id', 'name'],
+];
+$manyCompiler = new QueryCompiler($manyPack, new SchemaPolicy(), $manyColumns);
+$collected = $manyCompiler->compile(QueryPlan::fromArray([
+    'dataset' => 'receipts',
+    'metrics' => ['total'],
+    'dimensions' => ['client_name'],
+]), []);
+check('collect: the far side is folded into one value', str_contains($collected['sql'], 'GROUP_CONCAT(DISTINCT (clients.name)'), $collected['sql']);
+check('collect: the separator is the pack\'s own', str_contains($collected['sql'], "SEPARATOR ' & '"), $collected['sql']);
+check('collect: the relation is not joined into the query itself', !str_contains($collected['sql'], 'ON `receipts`.`unit_id` = `unit_clients`.') && str_contains($collected['sql'], 'FROM `receipts` LEFT JOIN (SELECT'), $collected['sql']);
+check('collect: the folded value is what is grouped by', str_contains($collected['sql'], 'GROUP BY `client_name_collected`.`client_name`'), $collected['sql']);
+check('collect: the base table is not multiplied', substr_count($collected['sql'], 'FROM `receipts`') === 1, $collected['sql']);
+check('collect: both tables are reported as read', in_array('unit_clients', $collected['tables'], true) && in_array('clients', $collected['tables'], true), implode(',', $collected['tables']));
+
+$manyDetail = $manyCompiler->compile(QueryPlan::fromArray([
+    'dataset' => 'receipts',
+    'dimensions' => ['client_name', 'amount'],
+]), []);
+check('collect: a list reads the folded value', str_contains($manyDetail['sql'], '`client_name_collected`.`client_name` AS `client_name`'), $manyDetail['sql']);
+
+$manyPackTrue = new DomainPack([[
+    'name' => 'x',
+    'datasets' => [[
+        'name' => 'receipts', 'table' => 'receipts',
+        'dimensions' => [['name' => 'client_name', 'collect' => true, 'expr' => 'clients.name', 'via' => ['unit_clients', 'clients']]],
+        'joins' => [
+            ['table' => 'unit_clients', 'alias' => 'unit_clients', 'on' => ['receipts.unit_id' => 'unit_clients.unit_id']],
+            ['table' => 'clients', 'alias' => 'clients', 'on' => ['unit_clients.client_id' => 'clients.id']],
+        ],
+    ]],
+]], $catalog, ['auto_derive' => false]);
+same('collect: true means group_concat', 'group_concat', (string) ($manyPackTrue->dimension('receipts', 'client_name')['collect'] ?? ''));
+same('collect: the separator keeps its spacing', ' & ', (string) ($manyPack->dimension('receipts', 'client_name')['separator'] ?? ''));
+
+$backPack = new DomainPack([[
+    'name' => 'x',
+    'datasets' => [[
+        'name' => 'receipts', 'table' => 'receipts',
+        'dimensions' => [['name' => 'client_name', 'collect' => 'group_concat', 'expr' => 'clients.name', 'via' => ['unit_clients', 'clients']]],
+        'joins' => [
+            ['table' => 'unit_clients', 'alias' => 'unit_clients', 'on' => ['receipts.unit_id' => 'unit_clients.unit_id']],
+            ['table' => 'clients', 'alias' => 'clients', 'on' => ['receipts.unit_id' => 'clients.id']],
+        ],
+    ]],
+]], $catalog, ['auto_derive' => false]);
+throws('collect: a relation may not reach back to its own table', fn () => (new QueryCompiler($backPack, new SchemaPolicy(), $manyColumns))
+    ->compile(QueryPlan::fromArray(['dataset' => 'receipts', 'dimensions' => ['client_name']]), []), 'may not reach back');
+
+$unsafeSeparator = new DomainPack([[
+    'name' => 'x',
+    'datasets' => [[
+        'name' => 'receipts', 'table' => 'receipts',
+        'dimensions' => [['name' => 'client_name', 'collect' => 'group_concat', 'separator' => "x', (SELECT 1)) -- ", 'expr' => 'clients.name', 'via' => ['unit_clients', 'clients']]],
+        'joins' => [
+            ['table' => 'unit_clients', 'alias' => 'unit_clients', 'on' => ['receipts.unit_id' => 'unit_clients.unit_id']],
+            ['table' => 'clients', 'alias' => 'clients', 'on' => ['unit_clients.client_id' => 'clients.id']],
+        ],
+    ]],
+]], $catalog, ['auto_derive' => false]);
+throws('collect: an unsafe separator is refused', fn () => (new QueryCompiler($unsafeSeparator, new SchemaPolicy(), $manyColumns))
+    ->compile(QueryPlan::fromArray(['dataset' => 'receipts', 'dimensions' => ['client_name']]), []), 'Unsafe separator');
+
 Config::reset();
 echo "{$passed} passed, {$failed} failed\n";
 exit($failed === 0 ? 0 : 1);
