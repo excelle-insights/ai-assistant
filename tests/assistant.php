@@ -688,6 +688,18 @@ check('labels: the key column is replaced by the name column', isset($staffAnswe
 same('labels: the answer names the person', 'Peter Otieno', (string) ($staffAnswer->rows[0]['staff_name'] ?? ''));
 same('labels: the answer carries the total', 900, (int) ($staffAnswer->rows[0]['amount'] ?? 0));
 
+$rankingAnswer = (new AssistantService(
+    llm: new ScriptedLlm(['intent' => 'data', 'plan' => [
+        'dataset' => 'payments', 'dimensions' => ['staff'], 'metrics' => ['amount'],
+    ]]),
+    conversations: new ArrayStore(),
+    pack: $staffPack,
+    compiler: $staffCompiler,
+    charts: new ChartService(),
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('which sales person has the highest number of payments?', $user);
+check('labels: a ranking keeps the grouping column', isset($rankingAnswer->rows[0]['staff_name']), json_encode($rankingAnswer->rows));
+
 $idAnswer = (new AssistantService(
     llm: new ScriptedLlm(['intent' => 'data', 'plan' => [
         'dataset' => 'payments', 'dimensions' => ['staff'], 'metrics' => ['amount'],

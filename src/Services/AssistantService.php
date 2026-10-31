@@ -1045,10 +1045,15 @@ final class AssistantService
 
         if ($metrics !== []) {
             // "How many customers?" is one number; a grouped count answers a
-            // different question than the one asked.
+            // different question than the one asked. "Which officer has the
+            // most booked leads?" is a ranking: the grouping column is the
+            // answer, so it stays.
             if ($dimensions !== []
                 && preg_match('/\b(how many|number of|count)\b/i', $question) === 1
-                && preg_match('/\b(per|by|each|across)\b/i', $question) === 0) {
+                && preg_match('/\b(per|by|each|across)\b/i', $question) === 0
+                && preg_match('/\b(which|who|whose)\b/i', $question) === 0
+                && preg_match('/\b(highest|lowest|best|worst|top|most|least|biggest|smallest|greatest)\b/i', $question) === 0
+            ) {
                 $plan['dimensions'] = [];
                 unset($plan['limit'], $plan['order_by']);
             }
