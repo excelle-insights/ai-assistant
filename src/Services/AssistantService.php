@@ -1614,12 +1614,18 @@ final class AssistantService
 
         $period = (string) ($compiled['applied_filters']['period'] ?? '');
         $dataset = (string) ($compiled['dataset'] ?? '');
+        $currency = trim(Config::string('domain.currency', ''));
+        $money = $currency !== ''
+            ? ' Write money with thousands separators and the currency ' . $currency . ' (for example "'
+                . $currency . ' 1,250,000"), and never add a different currency or unit.'
+            : ' Write money exactly as the values give it, with thousands separators, and never add a currency'
+                . ' symbol or a unit the table does not contain.';
         $messages = $this->convo(
-            $this->groundedPrompt('the query result', $result->asPromptText(), $request)
+            $this->groundedPrompt('the query result', $result->asPromptText(60, $this->columnLabels($dataset), (array) ($compiled['formats'] ?? [])), $request)
             . "\nThe table below is the complete answer and is already shown to the user: summarise it in one or two sentences"
             . ($period !== '' ? ', naming the period (' . $period . ')' : '')
-            . '. Use the column labels. Write money exactly as the values and labels give it: never add a currency'
-            . ' symbol or a unit the table does not contain; long numbers may take thousands separators, but keep every digit.'
+            . '. Use the column labels.' . $money
+            . ' Keep every digit.'
             . ' Never say the information is missing,'
             . ' incomplete or unavailable, and never apologise, when the table has rows.'
             . ' Never claim that every row shares a value ("all dated 25-08-2026") unless it is true; name a few rows instead.',
@@ -1641,6 +1647,38 @@ final class AssistantService
 
         return 'Showing ' . $result->count() . ($label !== '' ? ' ' . strtolower($label) : ' records')
             . ($period !== '' ? ' (' . $period . ')' : '') . '.';
+    }
+
+    /**
+     * Readable names for the columns of a result, so a summary says "credited
+     * amount" instead of the SQL alias "credited_amount".
+     *
+     * @return array<string,string>
+     */
+    private function columnLabels(string $dataset): array
+    {
+        if ($this->pack === null || $dataset === '') {
+            return [];
+        }
+        $entry = $this->pack->dataset($dataset);
+        if ($entry === null) {
+            return [];
+        }
+        $labels = [];
+        foreach (['dimensions', 'metrics'] as $key) {
+            foreach ((array) ($entry[$key] ?? []) as $item) {
+                if (!is_array($item)) {
+                    continue;
+                }
+                $name = strtolower(trim((string) ($item['name'] ?? '')));
+                $label = trim((string) ($item['label'] ?? ''));
+                if ($name !== '' && $label !== '') {
+                    $labels[$name] = $label;
+                }
+            }
+        }
+
+        return $labels;
     }
 
     /**
