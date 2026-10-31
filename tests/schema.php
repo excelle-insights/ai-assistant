@@ -133,6 +133,11 @@ same('values: dd-mm-yyyy with time', 'dd-mm-yyyy HH:MM', SchemaHints::dateFormat
 same('values: iso dates', 'yyyy-mm-dd', SchemaHints::dateFormatHint(['2025-04-01', '2025-04-02', '2025-12-31']));
 same('values: too few samples', '', SchemaHints::dateFormatHint(['01-04-2025']));
 same('values: not dates', '', SchemaHints::dateFormatHint(['Nairobi', 'Kiambu', 'Nakuru']));
+same('values: a column that mixes seconds and minutes still reads', 'dd-mm-yyyy HH:MM', SchemaHints::dateFormatHint(['05-01-2026 12:34:21', '05-01-2026 12:03:44', '05-01-2026 12:34']));
+same('values: a column of seconds keeps its seconds', 'dd-mm-yyyy HH:MM:SS', SchemaHints::dateFormatHint(['05-01-2026 12:34:21', '05-01-2026 12:03:44', '05-01-2026 11:58:15']));
+same('values: two-digit years', 'dd-mm-yy', SchemaHints::dateFormatHint(['03-03-26', '04-03-26', '05-03-26']));
+same('values: a zero date does not hide the shape', 'dd-mm-yy HH:MM', SchemaHints::dateFormatHint(['0000-00-00', '23-02-26 09:52', '17-02-26 16:10', '17-02-26 16:01', '23-02-26 09:51']));
+same('values: the mysql format of a mixed column reads every row', '%d-%m-%Y %H:%i', SchemaHints::mysqlDateFormat(SchemaHints::dateFormatHint(['05-01-2026 12:34:21', '05-01-2026 12:03:44', '05-01-2026 12:34'])));
 check('values: base64 of AES blocks is encrypted', SchemaHints::looksEncrypted(['XgApd7XbZYu+fKRZPPxKGg==', 'ctn1B/e79VLgmISegwWGAA==', '9n3VukHERNnhcldaOPUwNQ==']));
 check('values: counties are not encrypted', !SchemaHints::looksEncrypted(['Nairobi', 'Kiambu', 'Nakuru']));
 check('values: dates are not encrypted', !SchemaHints::looksEncrypted(['01-04-2025', '02-04-2025', '31-12-2025']));

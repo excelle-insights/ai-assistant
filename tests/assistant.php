@@ -110,6 +110,37 @@ final class ScriptedLlm implements LlmClientInterface
     }
 }
 
+/**
+ * A model that answers each call in turn: a thread can ask twice, and the
+ * second question must be routed the way the test scripts it.
+ */
+final class SequencedLlm implements LlmClientInterface
+{
+    public int $calls = 0;
+
+    /** @param array<int,array<string,mixed>> $replies */
+    public function __construct(public array $replies, public string $reply = 'Here is what I found.')
+    {
+    }
+
+    public function chat(array $messages, string $model = '', ?float $temperature = null): array
+    {
+        $this->calls++;
+        $system = (string) ($messages[0]['content'] ?? '');
+        $index = min($this->calls - 1, max(0, count($this->replies) - 1));
+        $content = str_contains($system, '"intent":"data|knowledge')
+            ? json_encode($this->replies[$index] ?? [], JSON_UNESCAPED_UNICODE)
+            : $this->reply;
+
+        return ['content' => $content, 'usage' => ['prompt_tokens' => 10, 'completion_tokens' => 2]];
+    }
+
+    public function embeddings(string $input, string $model = ''): array
+    {
+        return [];
+    }
+}
+
 final class ArrayStore implements ConversationStoreInterface
 {
     public array $turns = [];
@@ -233,8 +264,67 @@ final class FakeActions implements ActionHandlerInterface
 
 // ─── the "host database": one table, two tenants ──────────────────────────────
 $pdo = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+
+// The MySQL functions the compiler emits for text dates and period grouping.
+// SQLite has none of them, so the fixture teaches SQLite the same three.
+$pdo->sqliteCreateFunction('STR_TO_DATE', static function ($value, $format): ?string {
+    $value = trim((string) $value);
+    if ($value === '') {
+        return null;
+    }
+    $shapes = [
+        '%d-%m-%Y' => 'd-m-Y', '%d-%m-%Y %H:%i' => 'd-m-Y H:i', '%d-%m-%Y %H:%i:%s' => 'd-m-Y H:i:s',
+        '%d-%m-%y' => 'd-m-Y', '%Y-%m-%d' => 'Y-m-d', '%Y-%m-%d %H:%i:%s' => 'Y-m-d H:i:s',
+    ];
+    $date = \DateTime::createFromFormat($shapes[(string) $format] ?? 'd-m-Y', $value);
+    return $date === false ? null : $date->format('Y-m-d H:i:s');
+}, 2);
+$pdo->sqliteCreateFunction('DATE_FORMAT', static function ($value, $format): ?string {
+    $value = trim((string) $value);
+    if ($value === '') {
+        return null;
+    }
+    $date = null;
+    foreach (['Y-m-d H:i:s', 'Y-m-d', 'd-m-Y H:i:s', 'd-m-Y'] as $shape) {
+        $parsed = \DateTime::createFromFormat($shape, $value);
+        if ($parsed !== false) {
+            $date = $parsed;
+            break;
+        }
+    }
+    if ($date === null) {
+        $stamp = strtotime($value);
+        if ($stamp === false) {
+            return null;
+        }
+        $date = (new \DateTimeImmutable())->setTimestamp($stamp);
+    }
+    $tokens = ['%Y' => 'Y', '%y' => 'y', '%m' => 'm', '%c' => 'n', '%d' => 'd', '%H' => 'H', '%i' => 'i', '%s' => 's', '%M' => 'F'];
+    $php = (string) preg_replace_callback('/%[a-zA-Z]/', static fn (array $m): string => $tokens[$m[0]] ?? '', (string) $format);
+    return $date->format($php);
+}, 2);
+$pdo->sqliteCreateFunction('QUARTER', static function ($value): ?int {
+    $value = trim((string) $value);
+    $date = $value === '' ? false : \DateTime::createFromFormat('Y-m-d H:i:s', $value);
+    if ($date === false) {
+        $date = $value === '' ? false : \DateTime::createFromFormat('Y-m-d', $value);
+    }
+    if ($date === false) {
+        return null;
+    }
+    return (int) ceil((int) $date->format('n') / 3);
+}, 1);
+$pdo->sqliteCreateFunction('CONCAT', static function (...$args): string {
+    if (count($args) === 1 && is_array($args[0])) {
+        $args = $args[0];
+    }
+    return implode('', array_map(static fn ($arg): string => (string) $arg, $args));
+});
+
 $pdo->exec('CREATE TABLE orders (id INTEGER PRIMARY KEY, company_id INTEGER, customer_id INTEGER, status TEXT, total_amount NUMERIC, created_at TEXT)');
 $pdo->exec('CREATE TABLE empty_log (id INTEGER PRIMARY KEY, company_id INTEGER, day TEXT)');
+$pdo->exec('CREATE TABLE leads (id INTEGER PRIMARY KEY, company_id INTEGER, name TEXT, email TEXT, phone TEXT, state TEXT, in_date TEXT)');
+$pdo->exec('CREATE TABLE project_payments (id INTEGER PRIMARY KEY, company_id INTEGER, project_id INTEGER, amount NUMERIC, paid_on TEXT)');
 foreach ([
     [1, 7, 42, 'new', 100, '2026-10-01 09:00:00'],
     [2, 7, 42, 'done', 200, '2026-10-02 09:00:00'],
@@ -242,6 +332,21 @@ foreach ([
     [4, 8, 42, 'new', 900, '2026-10-04 09:00:00'],
 ] as $row) {
     $pdo->prepare('INSERT INTO orders VALUES (?,?,?,?,?,?)')->execute($row);
+}
+foreach ([
+    [1, 7, 'Amina', 'amina@example.com', '+254700111222', 'potential', '05-08-2026'],
+    [2, 7, 'Brian', 'brian@example.com', '+254700333444', 'potential', '12-09-2026'],
+    [3, 8, 'Cora', 'cora@example.com', '+254700555666', 'potential', '01-08-2026'],
+] as $row) {
+    $pdo->prepare('INSERT INTO leads VALUES (?,?,?,?,?,?,?)')->execute($row);
+}
+foreach ([
+    [1, 7, 1, 50000, '15-01-2026'],
+    [2, 7, 2, 30000, '05-03-2026'],
+    [3, 7, 2, 70000, '20-03-2026'],
+    [4, 8, 3, 900000, '02-04-2026'],
+] as $row) {
+    $pdo->prepare('INSERT INTO project_payments VALUES (?,?,?,?,?)')->execute($row);
 }
 
 $catalog = [
@@ -256,8 +361,34 @@ $catalog = [
             ['name' => 'created_at', 'type' => 'datetime', 'sensitivity' => 'internal'],
         ],
     ],
+    'leads' => [
+        'label' => 'Leads',
+        'columns' => [
+            ['name' => 'id', 'type' => 'int', 'sensitivity' => 'internal'],
+            ['name' => 'company_id', 'type' => 'int', 'sensitivity' => 'internal'],
+            ['name' => 'name', 'type' => 'text', 'sensitivity' => 'internal'],
+            ['name' => 'email', 'type' => 'text', 'sensitivity' => 'pii'],
+            ['name' => 'phone', 'type' => 'text', 'sensitivity' => 'pii'],
+            ['name' => 'state', 'type' => 'text', 'sensitivity' => 'internal'],
+            ['name' => 'in_date', 'type' => 'text', 'format' => 'date', 'date_format' => '%d-%m-%Y', 'sensitivity' => 'internal'],
+        ],
+    ],
+    'project_payments' => [
+        'label' => 'Project payments',
+        'columns' => [
+            ['name' => 'id', 'type' => 'int', 'sensitivity' => 'internal'],
+            ['name' => 'company_id', 'type' => 'int', 'sensitivity' => 'internal'],
+            ['name' => 'project_id', 'type' => 'int', 'sensitivity' => 'internal'],
+            ['name' => 'amount', 'type' => 'decimal', 'sensitivity' => 'financial', 'is_measure' => true, 'format' => 'money'],
+            ['name' => 'paid_on', 'type' => 'text', 'format' => 'date', 'date_format' => '%d-%m-%Y', 'sensitivity' => 'internal'],
+        ],
+    ],
 ];
-$tableColumns = ['orders' => ['id', 'company_id', 'customer_id', 'status', 'total_amount', 'created_at']];
+$tableColumns = [
+    'orders' => ['id', 'company_id', 'customer_id', 'status', 'total_amount', 'created_at'],
+    'leads' => ['id', 'company_id', 'name', 'email', 'phone', 'state', 'in_date'],
+    'project_payments' => ['id', 'company_id', 'project_id', 'amount', 'paid_on'],
+];
 
 Config::reset();
 Config::set('table_prefix', 'aiask');
@@ -276,7 +407,7 @@ $user = new UserContext('u1', 7, 'web', 'thread-1', ['sales']);
 $admin = new UserContext('u9', 7, 'web', 'thread-9', ['admin']);
 
 /** Builds the service with a SQLite-backed executor, so a compiled query really runs. */
-function service(?ScriptedLlm $llm = null, array $hooks = [], ?ConversationStoreInterface $store = null, ?PermissionResolverInterface $perms = null, ?KnowledgeRetrieverInterface $knowledge = null, ?ActionHandlerInterface $actions = null): AssistantService
+function service(?LlmClientInterface $llm = null, array $hooks = [], ?ConversationStoreInterface $store = null, ?PermissionResolverInterface $perms = null, ?KnowledgeRetrieverInterface $knowledge = null, ?ActionHandlerInterface $actions = null): AssistantService
 {
     global $compiler, $pack;
     return new AssistantService(
@@ -349,6 +480,69 @@ $asked = service(new ScriptedLlm(['intent' => 'data', 'plan' => [
     'dataset' => 'orders', 'metrics' => ['records'], 'date_range' => ['preset' => 'last_7_days'],
 ]]))->ask('orders from the last 7 days', $user);
 same('period: a range the question names is kept', 0, (int) first_value($asked->rows));
+
+// ─── "totals by month" is one summed row per month ─────────────────────────
+$byMonth = service(new ScriptedLlm(['intent' => 'data', 'plan' => [
+    'dataset' => 'project_payments', 'metrics' => ['amount'], 'dimensions' => ['month'],
+    'date_range' => ['from' => '2026-01-01', 'to' => '2026-12-31'],
+]]))->ask('payment totals by month in 2026', $user);
+$months = [];
+foreach ($byMonth->rows as $row) {
+    $months[(string) ($row['month'] ?? '')] = (float) ($row['amount'] ?? 0);
+}
+$monthNames = array_keys($months);
+sort($monthNames);
+same('period: the month is a column of its own', ['2026-01', '2026-03'], $monthNames);
+same('period: a month carries its own total', 50000.0, $months['2026-01'] ?? 0);
+same('period: two payments in one month are added up', 100000.0, $months['2026-03'] ?? 0);
+same('period: one row per month, not per payment', 2, count($byMonth->rows));
+
+// ─── a period grouping without a measure still totals ───────────────────────
+$noMeasure = service(new ScriptedLlm(['intent' => 'data', 'plan' => [
+    'dataset' => 'project_payments', 'dimensions' => ['month'],
+]]))->ask('payment totals by month in 2026', $user);
+$summed = [];
+foreach ($noMeasure->rows as $row) {
+    $summed[(string) ($row['month'] ?? '')] = (float) ($row['amount'] ?? 0);
+}
+check('period: the month carries a total', $summed !== [], json_encode($noMeasure->rows));
+same('period: the payments of a month are added up', 100000.0, $summed['2026-03'] ?? 0);
+same('period: a period question does not count records', 2, count($noMeasure->rows));
+
+$counted = service(new ScriptedLlm(['intent' => 'data', 'plan' => [
+    'dataset' => 'project_payments', 'dimensions' => ['month'],
+]]))->ask('how many payments by month in 2026', $user);
+$counts = [];
+foreach ($counted->rows as $row) {
+    $counts[(string) ($row['month'] ?? '')] = (int) ($row['records'] ?? 0);
+}
+same('period: a counting question counts records', 2, $counts['2026-03'] ?? 0);
+check('period: a counting question has no sum', !array_key_exists('amount', (array) ($counted->rows[0] ?? [])), json_encode($counted->rows));
+// ─── a follow-up that asks for more fields stays on the previous answer ─────
+$thread = new SequencedLlm([
+    ['intent' => 'data', 'plan' => [
+        'dataset' => 'leads', 'dimensions' => ['name', 'state'],
+        'filters' => [['field' => 'state', 'operator' => '=', 'value' => 'potential']],
+        'date_range' => ['from' => '2026-08-01', 'to' => '2026-08-31'],
+    ]],
+    ['intent' => 'knowledge'],
+]);
+$threadStore = new ArrayStore();
+$conversation = service($thread, [], $threadStore);
+$listed = $conversation->ask('show me the potential leads in August', $user);
+same('follow-up: the first answer is a data answer', 'data', $listed->intent);
+same('follow-up: it lists the leads of that month', 1, count($listed->rows));
+same('follow-up: the lead of August is the one listed', 'Amina', (string) ($listed->rows[0]['name'] ?? ''));
+
+$more = $conversation->ask('inlude contact info', $user);
+same('follow-up: the second answer is still a data answer', 'data', $more->intent);
+same('follow-up: it was routed as a continuation', 'follow_up', $more->meta['routed_by'] ?? '');
+check('follow-up: the contact columns are in the answer', isset($more->rows[0]['email'], $more->rows[0]['phone']), json_encode($more->rows));
+same('follow-up: the contact column carries the value', 'amina@example.com', (string) ($more->rows[0]['email'] ?? ''));
+same('follow-up: the answer is still the same lead', 'Amina', (string) ($more->rows[0]['name'] ?? ''));
+same('follow-up: the period of the first answer is kept', 1, count($more->rows));
+same('follow-up: the plan of the answer is kept', 'leads', (string) ($more->meta['plan']['dataset'] ?? ''));
+check('follow-up: the plan is marked as a continuation', (bool) ($more->meta['plan']['continued'] ?? false), json_encode($more->meta['plan'] ?? []));
 
 // ─── "all users" is a record list, not a count per category ───────────────────
 $namePack = new DomainPack([[
@@ -575,6 +769,16 @@ $nothingYet = (new AssistantService(
     hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
 ))->ask('how many log entries?', $user);
 check('empty: an empty table says nothing is recorded', str_contains($nothingYet->text, 'Nothing has been recorded'), $nothingYet->text);
+
+// The empty answer names the host's business; the package names no host itself.
+Config::set('domain.name', 'Acme Rentals');
+$ended = service(new ScriptedLlm(['intent' => 'data', 'plan' => [
+    'dataset' => 'leads', 'metrics' => ['records'],
+    'date_range' => ['from' => '2026-10-01', 'to' => '2026-10-31'],
+]]))->ask('how many leads in October 2026?', $user);
+check('empty: the hint names the host business', str_contains($ended->text, 'in Acme Rentals are from'), $ended->text);
+check('empty: the hint says when the data ends', str_contains($ended->text, 'September 2026'), $ended->text);
+Config::set('domain.name', '');
 
 $noExecutor = new AssistantService(
     llm: new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records']]]),

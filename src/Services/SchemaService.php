@@ -272,13 +272,31 @@ class SchemaService
                 $hint = $values === [] ? '' : SchemaHints::valueHint($column, $values);
                 $dataType = (string) ($c['data_type'] ?? '');
                 $format = SchemaHints::format($column, $dataType);
-                if ($hint !== '' && SchemaHints::dateFormatHint($values) !== '' && $format === 'text') {
-                    $format = str_contains(SchemaHints::dateFormatHint($values), 'HH') ? 'datetime' : 'date';
+                $dateFormat = '';
+                // The shape of the stored dates is read from the values, not from
+                // the value hint: a column of unique timestamps has no hint but
+                // still stores its dates in one readable shape.
+                $shape = $values === [] ? '' : SchemaHints::dateFormatHint($values);
+                if ($shape !== '' && $format === 'text') {
+                    $format = str_contains($shape, 'HH') ? 'datetime' : 'date';
+                    $dateFormat = SchemaHints::mysqlDateFormat($shape);
                 }
                 // Value hints are observations of the data, not guesses, so they
                 // survive auto_describe = false — a new table with no comments
                 // still tells the model its dates and enum values.
                 $guess = Config::bool('schema.auto_describe', true) ? $auto : '';
+                $meta = [
+                    'label' => SchemaHints::label($column),
+                    'table_label' => SchemaHints::label($name),
+                    'sensitivity' => SchemaHints::looksEncrypted($values) ? 'secret' : SchemaHints::sensitivity($column, $dataType, $this->policy),
+                    'is_measure' => SchemaHints::isMeasure($column, $dataType) ? 1 : 0,
+                    'format' => $format,
+                ];
+                // A shape we did not recognise this time keeps the one we did:
+                // a column that is empty today is still a text date.
+                if ($dateFormat !== '') {
+                    $meta['date_format'] = $dateFormat;
+                }
                 $this->writeCatalogRow(
                     $table,
                     $existing,
@@ -287,13 +305,7 @@ class SchemaService
                     $column,
                     (string) ($c['type'] ?? ''),
                     $dbComment !== '' ? $dbComment : trim($guess . $hint),
-                    [
-                        'label' => SchemaHints::label($column),
-                        'table_label' => SchemaHints::label($name),
-                        'sensitivity' => SchemaHints::looksEncrypted($values) ? 'secret' : SchemaHints::sensitivity($column, $dataType, $this->policy),
-                        'is_measure' => SchemaHints::isMeasure($column, $dataType) ? 1 : 0,
-                        'format' => $format,
-                    ],
+                    $meta,
                     $dbComment !== '' ? 'comment' : 'auto'
                 );
             }
@@ -411,18 +423,21 @@ class SchemaService
     {
         $name = $this->schemaTable();
         try {
+            $columns = 'table_name, column_name, data_type, description, label, table_label,'
+                . ' sensitivity, is_measure, format, aliases, description_source';
+            // A host that has not run the newest migration has no date_format
+            // column yet; the catalogue still works without it.
+            if (in_array('date_format', $this->catalogColumns($name), true)) {
+                $columns .= ', date_format';
+            }
             if ($table === null) {
                 $stmt = $this->connection()->prepare(
-                    'SELECT table_name, column_name, data_type, description, label, table_label,'
-                    . ' sensitivity, is_measure, format, aliases, description_source'
-                    . ' FROM `' . $name . '` ORDER BY table_name, column_name'
+                    'SELECT ' . $columns . ' FROM `' . $name . '` ORDER BY table_name, column_name'
                 );
                 $stmt->execute();
             } else {
                 $stmt = $this->connection()->prepare(
-                    'SELECT table_name, column_name, data_type, description, label, table_label,'
-                    . ' sensitivity, is_measure, format, aliases, description_source'
-                    . ' FROM `' . $name . '` WHERE table_name = :t ORDER BY column_name'
+                    'SELECT ' . $columns . ' FROM `' . $name . '` WHERE table_name = :t ORDER BY column_name'
                 );
                 $stmt->execute(['t' => $table]);
             }
@@ -463,6 +478,9 @@ class SchemaService
                 'sensitivity' => (string) ($r['sensitivity'] ?? 'internal'),
                 'is_measure' => (int) ($r['is_measure'] ?? 0) === 1,
                 'format' => (string) ($r['format'] ?? SchemaHints::format($column, (string) ($r['data_type'] ?? ''))),
+                // How a text date is written ("%d-%m-%Y"), so a query can read it
+                // as a date instead of comparing strings.
+                'date_format' => (string) ($r['date_format'] ?? ''),
                 'aliases' => array_values(array_filter(array_map('trim', preg_split('/[,;|]/', (string) ($r['aliases'] ?? '')) ?? []), fn ($v) => $v !== '')),
                 'source' => (string) ($r['description_source'] ?? 'auto'),
             ];
@@ -505,7 +523,7 @@ class SchemaService
             'created_at' => Db::now(),
             'updated_at' => Db::now(),
         ];
-        foreach (['label', 'table_label', 'sensitivity', 'format', 'aliases'] as $key) {
+        foreach (['label', 'table_label', 'sensitivity', 'format', 'date_format', 'aliases'] as $key) {
             if (array_key_exists($key, $meta)) {
                 $row[$key] = is_array($meta[$key]) ? implode(', ', $meta[$key]) : $meta[$key];
             }
@@ -1487,21 +1505,28 @@ class SchemaService
                 }
             }
         }
-        // A skewed table (99% NOTPAID) hides the other states from a row sample;
-        // ask the database for the distinct values of enum-like columns instead.
+        // A skewed table (99% NOTPAID) hides the other states from a row sample,
+        // and a sparse date column shows no date at all — the first rows hold
+        // nothing, or a zero date. Ask the database for the distinct values of
+        // those columns instead.
         foreach ($wanted as $column) {
-            $distinct = array_unique($out[$column] ?? []);
-            if (count($distinct) >= 2 || !SchemaHints::isEnumColumn($column)) {
+            $values = $out[$column] ?? [];
+            $distinct = array_unique($values);
+            $needsValues = (count($distinct) < 2 && SchemaHints::isEnumColumn($column))
+                || (count($values) < 12
+                    && str_contains(strtolower($column), 'date')
+                    && SchemaHints::dateFormatHint($values) === '');
+            if (!$needsValues) {
                 continue;
             }
             try {
                 $sql = 'SELECT DISTINCT `' . Db::identifier($column) . '` AS v FROM `' . Db::identifier($table) . '`'
                     . " WHERE `" . Db::identifier($column) . "` IS NOT NULL AND `" . Db::identifier($column) . "` <> '' LIMIT 12";
-                $values = $this->connection()->query($sql)->fetchAll(PDO::FETCH_COLUMN);
+                $found = $this->connection()->query($sql)->fetchAll(PDO::FETCH_COLUMN);
             } catch (\Throwable) {
                 continue;
             }
-            foreach ($values as $value) {
+            foreach ($found as $value) {
                 if (is_scalar($value) && (string) $value !== '') {
                     $out[$column][] = (string) $value;
                 }
@@ -1600,7 +1625,7 @@ class SchemaService
             'updated_at' => Db::now(),
         ];
         $columns = $this->catalogColumns($table);
-        foreach (['label', 'table_label', 'sensitivity', 'is_measure', 'format', 'aliases'] as $field) {
+        foreach (['label', 'table_label', 'sensitivity', 'is_measure', 'format', 'date_format', 'aliases'] as $field) {
             if (!array_key_exists($field, $meta) || !in_array($field, $columns, true)) {
                 continue;
             }

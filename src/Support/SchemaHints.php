@@ -327,24 +327,103 @@ final class SchemaHints
             'dd-mm-yyyy' => '/^(\d{2})-(\d{2})-(\d{4})$/',
             'dd-mm-yyyy HH:MM' => '/^(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2})$/',
             'dd-mm-yyyy HH:MM:SS' => '/^(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2}):(\d{2})$/',
+            'dd-mm-yy' => '/^(\d{2})-(\d{2})-(\d{2})$/',
+            'dd-mm-yy HH:MM' => '/^(\d{2})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/',
+            'dd-mm-yy HH:MM:SS' => '/^(\d{2})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/',
             'yyyy-mm-dd' => '/^(\d{4})-(\d{2})-(\d{2})$/',
             'yyyy-mm-dd HH:MM:SS' => '/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/',
         ];
-        foreach ($patterns as $label => $pattern) {
-            foreach ($values as $value) {
-                if (preg_match($pattern, $value, $m) !== 1) {
-                    continue 2;
-                }
-                $day = str_starts_with($label, 'd') ? (int) $m[1] : (int) $m[3];
-                $month = (int) $m[2];
-                $year = str_starts_with($label, 'd') ? (int) $m[3] : (int) $m[1];
-                if (!checkdate($month, $day, $year)) {
-                    continue 2;
+        // A column that stores both "05-01-2026 12:34" and "05-01-2026 12:34:21"
+        // still reads as one shape: MySQL ignores the seconds a format leaves
+        // out, so the shorter format reads every row.
+        $tolerant = [
+            'dd-mm-yyyy' => '/^(\d{2})-(\d{2})-(\d{4})$/',
+            'dd-mm-yyyy HH:MM' => '/^(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2})(?::\d{2})?$/',
+            'dd-mm-yyyy HH:MM:SS' => '/^(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2}):(\d{2})$/',
+            'dd-mm-yy' => '/^(\d{2})-(\d{2})-(\d{2})$/',
+            'dd-mm-yy HH:MM' => '/^(\d{2})-(\d{2})-(\d{2}) (\d{2}):(\d{2})(?::\d{2})?$/',
+            'dd-mm-yy HH:MM:SS' => '/^(\d{2})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/',
+            'yyyy-mm-dd' => '/^(\d{4})-(\d{2})-(\d{2})$/',
+            'yyyy-mm-dd HH:MM:SS' => '/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/',
+        ];
+
+        foreach ([$patterns, $tolerant] as $set) {
+            foreach ($set as $label => $pattern) {
+                if (self::matchingDates($values, $pattern, $label) === count($values)) {
+                    return $label;
                 }
             }
-            return $label;
         }
+
+        // No shape reads every value — a column may hold a zero date ("0000-00-00")
+        // or a stray value. The shape that reads the most values wins.
+        $best = '';
+        $bestCount = 0;
+        foreach ($tolerant as $label => $pattern) {
+            $count = self::matchingDates($values, $pattern, $label);
+            if ($count > $bestCount) {
+                $bestCount = $count;
+                $best = $label;
+            }
+        }
+        if ($bestCount >= 3 && $bestCount * 2 >= count($values)) {
+            return $best;
+        }
+
         return '';
+    }
+
+    /**
+     * How many of the values read as this shape, and are real dates.
+     *
+     * @param array<int,string> $values
+     */
+    private static function matchingDates(array $values, string $pattern, string $label): int
+    {
+        $count = 0;
+        foreach ($values as $value) {
+            if (preg_match($pattern, $value, $m) !== 1) {
+                continue;
+            }
+            $day = str_starts_with($label, 'd') ? (int) $m[1] : (int) $m[3];
+            $month = (int) $m[2];
+            $year = str_starts_with($label, 'd') ? (int) $m[3] : (int) $m[1];
+            if ($year < 100) {
+                // Two-digit years: 70 is 1970, 69 is 2069.
+                $year += $year >= 70 ? 1900 : 2000;
+            }
+            if (!checkdate($month, $day, $year)) {
+                continue;
+            }
+            $count++;
+        }
+
+        return $count;
+    }
+
+    /**
+     * The MySQL format string that reads a stored date shape.
+     *
+     * Text dates are stored in one shape per column ("25-08-2026"), so a query
+     * has to say how to read them; a native DATE column needs no format at all.
+     *
+     * @return string '' when the column holds real dates
+     */
+    public static function mysqlDateFormat(string $hint): string
+    {
+        $map = [
+            'dd-mm-yyyy' => '%d-%m-%Y',
+            'dd-mm-yyyy HH:MM' => '%d-%m-%Y %H:%i',
+            'dd-mm-yyyy HH:MM:SS' => '%d-%m-%Y %H:%i:%s',
+            'dd-mm-yy' => '%d-%m-%y',
+            'dd-mm-yy HH:MM' => '%d-%m-%y %H:%i',
+            'dd-mm-yy HH:MM:SS' => '%d-%m-%y %H:%i:%s',
+            'yyyy-mm-dd' => '%Y-%m-%d',
+            'yyyy-mm-dd HH:MM:SS' => '%Y-%m-%d %H:%i:%s',
+        ];
+        $key = trim($hint);
+
+        return $map[$key] ?? '';
     }
 
     /**

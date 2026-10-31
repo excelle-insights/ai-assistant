@@ -116,7 +116,7 @@ final class ConversationStore implements ConversationStoreInterface
             }
         }
 
-        Db::insert($this->connection(), $this->messages(), [
+        $row = [
             'id' => Db::uuid(),
             'conversation_id' => $conversationId,
             'company_id' => (int) ($conversation['company_id'] ?? 0),
@@ -138,7 +138,16 @@ final class ConversationStore implements ConversationStoreInterface
             'error' => isset($turn['error']) ? mb_substr((string) $turn['error'], 0, 2000) : null,
             'created_at' => Db::now(),
             'updated_at' => Db::now(),
-        ]);
+        ];
+        // A host that has not run the newest migration has no plan column yet;
+        // the thread still works, it just cannot continue a previous answer.
+        if ($this->hasPlanColumn()) {
+            $row['plan_json'] = isset($turn['plan']) && is_array($turn['plan']) && $turn['plan'] !== []
+                ? Db::json($turn['plan'])
+                : null;
+        }
+
+        Db::insert($this->connection(), $this->messages(), $row);
 
         $update = ['last_activity_at' => Db::now(), 'message_count' => (int) ($conversation['message_count'] ?? 0) + 1];
         if ($role === 'user' && trim((string) ($conversation['title'] ?? '')) === '' && $content !== '') {
@@ -153,13 +162,20 @@ final class ConversationStore implements ConversationStoreInterface
     /**
      * Recent turns, oldest first — the shape a chat client sends to a model.
      *
-     * @return array<int,array{role:string,content:string,created_at:string,intent:string}>
+     * A turn that carries the plan of the answer keeps it, so the next
+     * question in the thread can continue that answer.
+     *
+     * @return array<int,array{role:string,content:string,created_at:string,intent:string,plan?:array<string,mixed>}>
      */
     public function history(string $conversationId, int $limit = 10): array
     {
         $limit = $limit > 0 ? $limit : $this->historyTurns;
         if ($limit <= 0 || $conversationId === '') {
             return [];
+        }
+        $columns = ['role', 'content', 'created_at', 'intent', 'seq'];
+        if ($this->hasPlanColumn()) {
+            $columns[] = 'plan_json';
         }
         $rows = Db::select(
             $this->connection(),
@@ -169,7 +185,7 @@ final class ConversationStore implements ConversationStoreInterface
             [['seq', 'desc'], ['created_at', 'desc']],
             $limit,
             '',
-            ['role', 'content', 'created_at', 'intent', 'seq']
+            $columns
         );
         $turns = [];
         foreach (array_reverse($rows) as $row) {
@@ -178,14 +194,42 @@ final class ConversationStore implements ConversationStoreInterface
             if ($content === '' || !in_array($role, ['user', 'assistant'], true)) {
                 continue;
             }
-            $turns[] = [
+            $turn = [
                 'role' => $role,
                 'content' => $content,
                 'created_at' => (string) ($row['created_at'] ?? ''),
                 'intent' => (string) ($row['intent'] ?? ''),
             ];
+            $plan = $this->decodePlan((string) ($row['plan_json'] ?? ''));
+            if ($plan !== []) {
+                $turn['plan'] = $plan;
+            }
+            $turns[] = $turn;
         }
         return $turns;
+    }
+
+    /** @return array<string,mixed> */
+    private function decodePlan(string $json): array
+    {
+        if (trim($json) === '') {
+            return [];
+        }
+        $decoded = json_decode($json, true);
+
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    /** True when the messages table keeps the plan of an answer. */
+    private function hasPlanColumn(): bool
+    {
+        static $cache = [];
+        $table = $this->messages();
+        if (!array_key_exists($table, $cache)) {
+            $cache[$table] = in_array('plan_json', Db::columnsOf($this->connection(), $table), true);
+        }
+
+        return $cache[$table];
     }
 
     /** Everything about a thread, oldest first — what a widget re-renders. */

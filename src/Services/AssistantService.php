@@ -55,6 +55,15 @@ final class AssistantService
     /** Intents the router may choose. */
     public const INTENTS = ['data', 'knowledge', 'document', 'action', 'report', 'help', 'smalltalk'];
 
+    /** The parts of a date a question can group by. */
+    private const PERIOD_NAMES = ['month', 'year', 'quarter', 'week', 'day', 'monthly', 'yearly', 'quarterly', 'weekly', 'daily'];
+
+    /** Typoes that must not change what a question means. */
+    private const MISSPELLINGS = [
+        'inlude' => 'include', 'inlcude' => 'include', 'inclue' => 'include', 'inculde' => 'include',
+        'adress' => 'address', 'emial' => 'email', 'phoen' => 'phone', 'contct' => 'contact',
+    ];
+
     private LlmClientInterface $llm;
     private ?ConversationStoreInterface $conversations;
     private ?DomainPack $pack;
@@ -261,14 +270,123 @@ final class AssistantService
         $messages = $this->convo($this->routerPrompt($request), $request->question, $history);
         $json = self::jsonObject((string) ($this->chat($messages, 0.0)['content'] ?? ''));
         $intent = strtolower(trim((string) ($json['intent'] ?? '')));
+        $plan = (array) ($json['plan'] ?? []);
+
+        // "Include their contact details" names no dataset: it continues the
+        // answer before it. Without this the router sends it to the knowledge
+        // base and the thread loses its subject.
+        $previous = $this->previousDataPlan($history);
+        if ($previous !== null && $this->continuesPreviousAnswer($request->question) && $intent !== 'data') {
+            return ['intent' => 'data', 'plan' => $this->asContinuation($previous), 'by' => 'follow_up'];
+        }
+        if ($intent === 'data' && $plan === [] && $previous !== null && $this->continuesPreviousAnswer($request->question)) {
+            return ['intent' => 'data', 'plan' => $this->asContinuation($previous), 'by' => 'follow_up'];
+        }
         if (in_array($intent, self::INTENTS, true)) {
-            return ['intent' => $intent, 'plan' => (array) ($json['plan'] ?? []), 'by' => 'router'];
+            return ['intent' => $intent, 'plan' => $plan, 'by' => 'router'];
         }
 
         // The model gave nothing usable — the question is read instead. `by` keeps
         // that visible in the answer's meta, so a support ticket can tell a model
         // answer from a fallback one.
-        return ['intent' => $this->guessIntent($request->question), 'plan' => (array) ($json['plan'] ?? []), 'by' => 'guessed'];
+        return ['intent' => $this->guessIntent($request->question), 'plan' => $plan, 'by' => 'guessed'];
+    }
+
+    /**
+     * A continued plan keeps the period of the answer it continues: "include
+     * their contact details" still means the same month.
+     *
+     * @param array<string,mixed> $plan
+     * @return array<string,mixed>
+     */
+    private function asContinuation(array $plan): array
+    {
+        $plan['continued'] = true;
+
+        return $plan;
+    }
+
+    /**
+     * The plan of the last data answer in this thread, if there is one.
+     *
+     * @param array<int,array<string,mixed>> $history
+     * @return array<string,mixed>|null
+     */
+    private function previousDataPlan(array $history): ?array
+    {
+        for ($index = count($history) - 1; $index >= 0; $index--) {
+            $turn = (array) ($history[$index] ?? []);
+            if ((string) ($turn['role'] ?? '') !== 'assistant') {
+                continue;
+            }
+            $plan = (array) ($turn['plan'] ?? []);
+            if ($plan === []) {
+                return null;
+            }
+            if (trim((string) ($plan['dataset'] ?? '')) === '') {
+                return null;
+            }
+            return $plan;
+        }
+
+        return null;
+    }
+
+    /**
+     * True when the question only asks for more of what was just answered.
+     *
+     * "Include contact info", "add their details", "show the numbers too" —
+     * none of them names a dataset, so they are a continuation, not a new
+     * question. A question that names its own subject is never one.
+     */
+    private function continuesPreviousAnswer(string $question): bool
+    {
+        $text = ' ' . strtolower(trim($question)) . ' ';
+        // "inlude contact info" is the same question as "include contact info".
+        $text = strtr($text, self::MISSPELLINGS);
+        if (mb_strlen(trim($question)) > 120) {
+            return false;
+        }
+        if ($this->namesItsOwnSubject($text)) {
+            return false;
+        }
+        if (preg_match('/\b(how many|how much|total|sum|average|count|compare|rank|chart|export|download|report|create|add|delete|update|change|send|email|schedule)\b/', $text) === 1
+            && preg_match('/\b(include|with|also|plus|add|show|give|list)\b/', $text) === 0) {
+            return false;
+        }
+        if (preg_match('/\b(include|with|also|plus|add|show|give|list|more|their|them|it)\b/', $text) !== 1) {
+            return false;
+        }
+        // The words that say "same records, more columns".
+        return preg_match('/\b(details?|info|information|contacts?|emails?|phones?|numbers?|names?|addresses?|status|state|source|owner|campaign|amounts?|prices?|dates?|history|comments?|notes?|photos?|files?|documents?)\b/', $text) === 1;
+    }
+
+    /**
+     * True when the question names a dataset of its own — then it is a new
+     * question, not a continuation of the answer before it.
+     */
+    private function namesItsOwnSubject(string $text): bool
+    {
+        if ($this->pack === null) {
+            return false;
+        }
+        foreach ($this->pack->listDatasets() as $dataset) {
+            $names = array_merge(
+                [(string) ($dataset['name'] ?? ''), (string) ($dataset['label'] ?? '')],
+                array_map('strval', (array) ($dataset['aliases'] ?? []))
+            );
+            foreach ($names as $name) {
+                $needle = strtolower(trim((string) preg_replace('/[^a-z0-9]+/i', ' ', str_replace('_', ' ', (string) $name))));
+                if ($needle === '' || strlen($needle) < 3) {
+                    continue;
+                }
+                if (str_contains($text, ' ' . $needle . ' ')) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /** Last resort when the model gives nothing usable: read the question. */
@@ -336,6 +454,8 @@ final class AssistantService
                 '- "All users", "all leads" and "list clients" ask for records: use the identity dimension (name, or title/unit when the dataset has one) and no measure, so each record is identified. Group by categories only when the question says "by ..." or asks how many.',
                 '- A word in also[...] or a dataset label is the same dataset (for example "projects" or "properties" for listings). Resolve it to the dataset name.',
                 '- date[field] in the vocabulary marks the dataset\'s own date column. Use it only through date_range; never put that field in dimensions, filters, metrics or order_by.',
+                '- periods[month|year] (or a dimension named month, year, quarter, week or day) are that same date broken into parts. A question about a period ("payment totals by month", "leads per quarter") groups by that name AND adds the metric for the amount, so every period is one summed row — never one row per record.',
+                '- A question that only adds fields to the previous answer ("include contact info", "add their details") stays on the same dataset and adds those fields.',
                 '- Time words ("this month", "last year", "today") always become date_range, never a filter on a date column.',
                 '- Include date_range only when the question names a period ("this month", "last year", a date or a year). "All users", "all listings" and "show me tasks" mean every record: date_range must be null.',
                 '- Facts the user typed in (prices, policies, instructions) are intent "knowledge".',
@@ -634,6 +754,10 @@ final class AssistantService
                 'columns' => $result->columns,
                 'formats' => (array) ($compiled['formats'] ?? []),
                 'dataset' => (string) ($compiled['dataset'] ?? ''),
+                // The plan that produced this answer, so a follow-up ("include
+                // their contact details") can continue it instead of starting
+                // a new question.
+                'plan' => (array) ($compiled['plan'] ?? []),
                 'truncated' => $result->truncated,
                 'source' => $result->source,
                 'export' => $export,
@@ -756,9 +880,120 @@ final class AssistantService
         $plan = $this->withDisplayLabels($plan, $question);
         $plan = $this->withDimensionColumns($plan, $question);
         $plan = $this->withMentionedFields($plan, $question);
+        $plan = $this->withPeriodTotals($plan, $question);
         $plan = $this->withRelativePeriod($this->withDefaultShape($plan, $question), $question);
 
         return $this->withPeriodGuard($plan, $question);
+    }
+
+    /**
+     * "Payment totals by month" is one summed row per month. A plan that groups
+     * by a period but names no measure answers with one row per payment and its
+     * own amount — the very numbers the user asked to be added up. So the
+     * period grouping and the measure that belongs to it travel together.
+     *
+     * @param array<string,mixed> $plan
+     * @return array<string,mixed>
+     */
+    private function withPeriodTotals(array $plan, string $question): array
+    {
+        if ($this->pack === null || !isset($plan['dataset']) || !is_string($plan['dataset'])) {
+            return $plan;
+        }
+        $dataset = $this->pack->dataset($plan['dataset']);
+        if ($dataset === null) {
+            return $plan;
+        }
+        $dimensions = array_values(array_map('strval', (array) ($plan['dimensions'] ?? [])));
+        // "by month", "per quarter", "each year" — the period the user groups by.
+        $named = '';
+        if (preg_match('/\b(?:by|per|each|in|for)\s+(month|year|quarter|week|day)\b/i', $question, $m) === 1) {
+            $named = strtolower($m[1]);
+        }
+        $groups = false;
+        foreach ($dimensions as $dimension) {
+            if (in_array(strtolower($dimension), self::PERIOD_NAMES, true)) {
+                $groups = true;
+                break;
+            }
+        }
+        if (!$groups && $named === '') {
+            return $plan;
+        }
+        // The dataset's own period dimension joins the answer, even when the
+        // model grouped by the raw date column.
+        if ($named !== '' && !in_array($named, $dimensions, true) && $this->pack->dimension((string) $plan['dataset'], $named) !== null) {
+            $dimensions[] = $named;
+            $plan['dimensions'] = $dimensions;
+        }
+        if ((array) ($plan['metrics'] ?? []) !== []) {
+            return $plan;
+        }
+        // A list of the month's records is not a total; only a question that
+        // asks for one gets a measure.
+        if (preg_match('/\b(totals?|sums?|summed|how much|how many|counts?|number of|revenue|collected|averages?|average|monthly|yearly|quarterly|weekly|daily)\b/i', $question) !== 1) {
+            return $plan;
+        }
+        $metric = $this->periodMetric($dataset, $question);
+        if ($metric !== '') {
+            $plan['metrics'] = [$metric];
+        }
+
+        return $plan;
+    }
+
+    /**
+     * The measure a period question wants: a count when the user counts, the
+     * money column when the user totals, the average when the user averages.
+     *
+     * @param array<string,mixed> $dataset
+     */
+    private function periodMetric(array $dataset, string $question): string
+    {
+        $metrics = [];
+        foreach ((array) ($dataset['metrics'] ?? []) as $metric) {
+            if (is_array($metric) && trim((string) ($metric['name'] ?? '')) !== '') {
+                $metrics[] = $metric;
+            }
+        }
+        if ($metrics === []) {
+            return '';
+        }
+        $wantsCount = preg_match('/\b(how many|counts?|number of)\b/i', $question) === 1;
+        $wantsAverage = preg_match('/\b(averages?|average)\b/i', $question) === 1;
+        if ($wantsCount) {
+            foreach ($metrics as $metric) {
+                if ((string) ($metric['function'] ?? '') === 'count') {
+                    return (string) $metric['name'];
+                }
+            }
+
+            return '';
+        }
+        if ($wantsAverage) {
+            foreach ($metrics as $metric) {
+                if ((string) ($metric['function'] ?? '') === 'avg') {
+                    return (string) $metric['name'];
+                }
+            }
+        }
+        foreach ($metrics as $metric) {
+            if ((string) ($metric['function'] ?? '') === 'sum' && (string) ($metric['format'] ?? '') === 'money') {
+                return (string) $metric['name'];
+            }
+        }
+        foreach ($metrics as $metric) {
+            if ((string) ($metric['function'] ?? '') === 'sum') {
+                return (string) $metric['name'];
+            }
+        }
+        foreach ($metrics as $metric) {
+            if ((string) ($metric['function'] ?? '') === 'count') {
+                return (string) $metric['name'];
+            }
+        }
+
+        return '';
     }
 
     /**
@@ -824,7 +1059,7 @@ final class AssistantService
         if (preg_match('/\b(list|latest|recent|show|display|all|details?|records?)\b/i', $question) !== 1) {
             return $plan;
         }
-        if (preg_match('/\b(how many|how much|count|total|sum|average|per|by each)\b/i', $question) === 1) {
+        if (preg_match('/\b(how many|how much|counts?|totals?|sums?|averages?|per|by each)\b/i', $question) === 1) {
             return $plan;
         }
         $dataset = (string) $plan['dataset'];
@@ -962,11 +1197,53 @@ final class AssistantService
                 $chosen[] = (string) $name;
             }
         }
+        // "Include contact info" asks for the columns that carry contact
+        // details — the phone and the address a record keeps for its person.
+        if (preg_match('/\bcontacts?\b/i', $question) === 1) {
+            $contacts = 0;
+            foreach ((array) ($dataset['dimensions'] ?? []) as $dimension) {
+                if ($contacts >= 4) {
+                    break;
+                }
+                if (!is_array($dimension)) {
+                    continue;
+                }
+                $name = (string) ($dimension['name'] ?? '');
+                if ($name === '' || in_array($name, $chosen, true)) {
+                    continue;
+                }
+                if (self::isContactColumn($dimension)) {
+                    $chosen[] = $name;
+                    $contacts++;
+                }
+            }
+        }
         if ($chosen !== []) {
             $plan['dimensions'] = array_values(array_unique($chosen));
         }
 
         return $plan;
+    }
+
+    /**
+     * A column that carries how to reach a person: a phone number, an email
+     * address, a postal address or a messenger handle.
+     *
+     * @param array<string,mixed> $dimension
+     */
+    private static function isContactColumn(array $dimension): bool
+    {
+        $words = strtolower(trim((string) ($dimension['name'] ?? '')) . ' '
+            . strtolower((string) ($dimension['label'] ?? '')) . ' '
+            . strtolower(implode(' ', array_map('strval', (array) ($dimension['aliases'] ?? [])))));
+
+        foreach (['email', 'mail', 'phone', 'mobile', 'tel', 'msisdn', 'whatsapp', 'contact', 'address', 'telephone'] as $word) {
+            if (str_contains($words, $word)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -980,6 +1257,10 @@ final class AssistantService
     private function withPeriodGuard(array $plan, string $question): array
     {
         if (!isset($plan['date_range']) || $this->questionNamesPeriod($question)) {
+            return $plan;
+        }
+        // A continued answer keeps the period of the answer it continues.
+        if ((bool) ($plan['continued'] ?? false)) {
             return $plan;
         }
         unset($plan['date_range']);
@@ -1143,7 +1424,7 @@ final class AssistantService
             }
         }
         $listQuestion = preg_match('/\b(all|list|show|display)\b/i', $question) === 1
-            && preg_match('/\b(how many|how much|count|total|number of|average|sum|revenue|trend|conversion|top|best|highest|lowest|worst|least|bottom)\b/i', $question) === 0
+            && preg_match('/\b(how many|how much|counts?|totals?|number of|averages?|sums?|revenues?|trends?|conversions?|top|best|highest|lowest|worst|least|bottom)\b/i', $question) === 0
             && preg_match('/\bby\b/i', $question) === 0;
 
         // "All users" and "show clients" are record lists: a count per category
@@ -1169,7 +1450,7 @@ final class AssistantService
             // most booked leads?" is a ranking: the grouping column is the
             // answer, so it stays.
             if ($dimensions !== []
-                && preg_match('/\b(how many|number of|count)\b/i', $question) === 1
+                && preg_match('/\b(how many|number of|counts?)\b/i', $question) === 1
                 && preg_match('/\b(per|by|each|across)\b/i', $question) === 0
                 && preg_match('/\b(which|who|whose)\b/i', $question) === 0
                 && preg_match('/\b(highest|lowest|best|worst|top|most|least|biggest|smallest|greatest)\b/i', $question) === 0
@@ -1194,7 +1475,7 @@ final class AssistantService
             return $plan;
         }
 
-        $wantsNumber = preg_match('/\b(how many|how much|count|total|number of|average|sum|revenue|trend|conversion)\b/i', $question) === 1;
+        $wantsNumber = preg_match('/\b(how many|how much|counts?|totals?|number of|averages?|sums?|revenues?|trends?|conversions?)\b/i', $question) === 1;
         if ($wantsNumber) {
             foreach ((array) ($dataset['metrics'] ?? []) as $metric) {
                 if (($metric['function'] ?? '') === 'count') {
@@ -2131,8 +2412,10 @@ final class AssistantService
             $hint = ' Nothing has been recorded in ' . strtolower((string) $latest['dataset']) . ' yet.';
         } elseif ($hasPeriod && $latest !== []) {
             // "The data ends in March" only helps when a period was asked for.
+            $where = $this->placeName($request);
             $hint = ' The most recent ' . strtolower((string) $latest['dataset'])
-                . ' in AMS are from ' . $latest['month']
+                . ($where !== '' ? ' in ' . $where : '')
+                . ' are from ' . $latest['month']
                 . ' (' . $latest['metric'] . ': ' . $latest['value'] . ')'
                 . ', so this period sits after the latest records.';
         }
@@ -2147,6 +2430,22 @@ final class AssistantService
             appliedFilters: $appliedFilters,
             suggestions: ['Try last 12 months', 'Show all records']
         );
+    }
+
+    /**
+     * The business the answer speaks about, named by the host — never a name
+     * baked into this package.
+     */
+    private function placeName(AskRequest $request): string
+    {
+        $name = trim(Config::string('domain.name', ''));
+        if ($name !== '') {
+            return $name;
+        }
+
+        $company = trim((string) ($request->user->attributes['company'] ?? ''));
+
+        return $company !== '' ? $company : trim(Config::string('domain.assistant_name', ''));
     }
 
     /** An all-NULL aggregate row (SUM over no rows) is not evidence worth showing. */
@@ -2283,6 +2582,9 @@ final class AssistantService
                     'chart' => $answer->chart,
                     'applied_filters' => $answer->appliedFilters,
                     'sql' => $answer->sql,
+                    // The query behind the answer, so the next question in this
+                    // thread can continue it instead of starting over.
+                    'plan' => (array) ($answer->meta['plan'] ?? []),
                     'status' => $answer->grounded ? 'ok' : 'ungrounded',
                     'latency_ms' => (int) round((microtime(true) - $startedAt) * 1000),
                 ]);

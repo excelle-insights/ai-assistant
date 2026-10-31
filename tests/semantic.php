@@ -120,6 +120,51 @@ check('vocab: lists metrics and dimensions', str_contains($vocabulary, 'total_am
 check('vocab: never leaks a secret column', !str_contains($vocabulary, 'password'));
 check('vocab: mentions the date field', str_contains($vocabulary, 'date[created_at]'));
 check('vocab: budget respected', strlen($auto->vocabulary(120, 2)) <= 400, (string) strlen($auto->vocabulary(120, 2)));
+check('vocab: mentions the periods', str_contains($vocabulary, 'periods[') && str_contains($vocabulary, 'month'), $vocabulary);
+
+// ─── DomainPack: the periods of a dataset's own date ─────────────────────────
+$month = $auto->dimension('orders', 'month');
+check('pack: month is a dimension of its own', $month !== null);
+check('pack: month reads the date column', str_contains((string) ($month['expr'] ?? ''), "DATE_FORMAT(`orders`.`created_at`, '%Y-%m')"), json_encode($month));
+check('pack: year is a dimension of its own', $auto->dimension('orders', 'year') !== null);
+check('pack: quarter is a dimension of its own', $auto->dimension('orders', 'quarter') !== null);
+check('pack: a period resolves by its alias', ($auto->dimension('orders', 'monthly')['name'] ?? '') === 'month');
+check('pack: a period is listed among the dimension names', in_array('month', $auto->dimensionNames('orders'), true));
+same('pack: a dataset without a date has no periods', null, $auto->dimension('currencies', 'month'));
+
+// A text date ("25-08-2026") can only be read with the format it is written in.
+$textCatalog = [
+    'payments' => [
+        'label' => 'Payments',
+        'description' => '',
+        'columns' => [
+            ['name' => 'id', 'type' => 'int', 'description' => '', 'label' => 'Id', 'sensitivity' => 'internal', 'is_measure' => false, 'format' => 'number', 'aliases' => [], 'source' => 'auto'],
+            ['name' => 'paid_on', 'type' => 'varchar', 'description' => '', 'label' => 'Paid on', 'sensitivity' => 'internal', 'is_measure' => false, 'format' => 'date', 'date_format' => '%d-%m-%Y', 'aliases' => [], 'source' => 'auto'],
+            ['name' => 'amount', 'type' => 'decimal', 'description' => '', 'label' => 'Amount', 'sensitivity' => 'internal', 'is_measure' => true, 'format' => 'money', 'aliases' => [], 'source' => 'auto'],
+        ],
+    ],
+];
+$textPack = new DomainPack([], $textCatalog);
+same('pack: a text date keeps its stored format', '%d-%m-%Y', (string) ($textPack->dataset('payments')['date_format'] ?? ''));
+check('pack: a text date is read with that format', str_contains((string) ($textPack->dimension('payments', 'month')['expr'] ?? ''), "STR_TO_DATE(`payments`.`paid_on`, '%d-%m-%Y')"), (string) ($textPack->dimension('payments', 'month')['expr'] ?? ''));
+
+$autoCompiler = new QueryCompiler($auto, new SchemaPolicy(), $tableColumns);
+$byMonth = $autoCompiler->compile(QueryPlan::fromArray([
+    'dataset' => 'orders',
+    'metrics' => ['total_amount'],
+    'dimensions' => ['month'],
+]), ['tenant_id' => 7]);
+check('sql: totals by month group by the period', str_contains($byMonth['sql'], "GROUP BY (DATE_FORMAT(`orders`.`created_at`, '%Y-%m'))"), $byMonth['sql']);
+check('sql: the period is selected', str_contains($byMonth['sql'], "AS `month`"), $byMonth['sql']);
+check('sql: the amount is summed', str_contains($byMonth['sql'], 'SUM(`orders`.`total_amount`)'), $byMonth['sql']);
+
+$textCompiler = new QueryCompiler($textPack, new SchemaPolicy(), ['payments' => ['id', 'paid_on', 'amount']]);
+$textByMonth = $textCompiler->compile(QueryPlan::fromArray([
+    'dataset' => 'payments',
+    'metrics' => ['amount'],
+    'dimensions' => ['month'],
+]), []);
+check('sql: a text date is grouped by its format', str_contains($textByMonth['sql'], "STR_TO_DATE(`payments`.`paid_on`, '%d-%m-%Y')"), $textByMonth['sql']);
 
 $verbose = new DomainPack([[
     'name' => 'crm',
