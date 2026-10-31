@@ -186,6 +186,19 @@ return [
         'questions' => $csv($env(['AI_ASSISTANT_DISCOVERY_QUESTIONS'])),
     ],
 
+    // ── The quality bar (the questions a CRM must keep answering) ───────────
+    // A benchmark file per CRM: canonical questions with the dataset, the
+    // columns and the value the answer must have. It is run on demand from
+    // the admin screen and in CI.
+    'benchmark' => [
+        // Where the benchmark file lives.
+        'file' => (string) $env(['AI_ASSISTANT_BENCHMARK_FILE'], ''),
+        // Where benchmark.write puts it. Empty = nothing is written.
+        'output_dir' => (string) $env(['AI_ASSISTANT_BENCHMARK_OUTPUT_DIR'], ''),
+        // The share of key columns an answer may carry before it fails.
+        'id_ceiling' => (float) $env(['AI_ASSISTANT_BENCHMARK_ID_CEILING'], 0.5),
+    ],
+
     // ── Charts (visualisation of any result set) ─────────────────────────────
     // Every key here is a shape hint the ChartService reads; empty/omitted means
     // its own default. Types not listed stay disabled only if you list some.

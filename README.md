@@ -114,6 +114,8 @@ Start with [docs/README.md](docs/README.md) for the reading order.
 13. [LLM providers](docs/13-llm-providers.md) — OpenAI, OpenRouter, Ollama, vLLM, DeepSeek, local
 14. [Troubleshooting](docs/14-troubleshooting.md) — failures you will actually see, and what they mean
 15. [Bookings](docs/15-bookings.md) — package-owned bookings, booking numbers, recall, host actions
+16. [CRM intelligence roadmap](docs/16-crm-intelligence-roadmap.md) — what the package knows about a CRM, and the plan for learning one by itself
+17. [Benchmark](docs/17-benchmark.md) — the per-CRM quality bar: canonical questions, the six metrics
 
 ## Development
 

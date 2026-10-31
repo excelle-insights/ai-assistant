@@ -633,6 +633,7 @@ final class AssistantService
             meta: [
                 'columns' => $result->columns,
                 'formats' => (array) ($compiled['formats'] ?? []),
+                'dataset' => (string) ($compiled['dataset'] ?? ''),
                 'truncated' => $result->truncated,
                 'source' => $result->source,
                 'export' => $export,

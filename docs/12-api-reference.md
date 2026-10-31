@@ -359,6 +359,46 @@ Settings (`operations_json`):
 | `discovery.output_dir` | Where the two files are written (empty = the draft is returned, nothing is written) |
 | `discovery.questions` | The questions the install proves itself against |
 
+### The benchmark — the quality bar of one CRM
+
+| Action | Input keys | Returns |
+|---|---|---|
+| `benchmark.run` | tenant, `options` | `benchmark` |
+| `benchmark.template` | tenant, `options` | `benchmark` |
+| `benchmark.write` | tenant, `benchmark`, `options` | `path`, `written`, `error` |
+| `benchmark.read` | `path` | `crm`, `questions`, `path`, `error` |
+
+A benchmark is a list of canonical questions with what the answer should look
+like: the dataset it comes from, the columns it carries, the value it adds up
+to. The file is JSON, so a business person owns it and the host commits it.
+
+The run asks the **real assistant** — the same router, plan shaping, compiler
+and read-only runner a user hits — and scores six things: routing, columns,
+the id rate (a name instead of a key), money, permission and freshness. A
+question the permission layer refused is *skipped*, not failed; a forbidden
+column that came back is.
+
+```php
+$api->handle('benchmark.template', ['company_id' => 3]);   // a starter file
+$api->handle('benchmark.write', [
+    'company_id' => 3,
+    'benchmark'  => $template['benchmark'],
+    'options'    => ['output_dir' => '/path/to/repo'],
+]);
+$report = $api->handle('benchmark.run', ['company_id' => 3])['benchmark'];
+// ['total' => 12, 'passed' => 12, 'failed' => 0, 'metrics' => [...], 'cases' => [...]]
+```
+
+Settings (`operations_json`):
+
+| Path | Meaning |
+|---|---|
+| `benchmark.file` | The file a run reads (empty = the run must be told which) |
+| `benchmark.output_dir` | Where `benchmark.write` puts the file |
+| `benchmark.id_ceiling` | The share of key columns an answer may carry (0–1, default 0.5) |
+
+Full guide: [17 — Benchmark](17-benchmark.md).
+
 ### Reports and schedules
 
 | Action | Input keys | Returns |
@@ -454,6 +494,10 @@ a public method — same envelope, no routing layer.
 
 `discover()`, `discoverDraft()`, `importDiscoveryKnowledge()`.
 
+### The benchmark
+
+`benchmarkRun()`, `benchmarkTemplate()`, `benchmarkWrite()`, `benchmarkRead()`.
+
 ### Reports and schedules
 
 `createReport()`, `updateReport()`, `deleteReport()`, `getReport()`,
@@ -500,9 +544,9 @@ $api->service('configuration')->effective(3);
 ```
 
 Naming: `llm`, `policy`, `schema`, `knowledge`, `relations`, `code`, `queries`,
-`rules`, `discovery`, `documents`, `export`, `actions`, `outbox`, `reports`,
-`schedules`, `feedback`, `usage`, `settings`, `configuration`, `audit`, `charts`,
-`conversations`, `assistant`.
+`rules`, `discovery`, `benchmark`, `documents`, `export`, `actions`, `outbox`,
+`reports`, `schedules`, `feedback`, `usage`, `settings`, `configuration`,
+`audit`, `charts`, `conversations`, `assistant`.
 
 ---
 

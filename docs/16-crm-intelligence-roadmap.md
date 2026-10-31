@@ -40,7 +40,7 @@ real; nothing here is aspirational fiction.
 | A key column (`staff_id`) becomes a name only when a pack declares the sibling | on an uncurated CRM the answer says "12" instead of "Jane Wanjiru" | P1 ✅ |
 | There is no **onboarding flow** | installing into a new CRM still needs a human to write the pack | P5 ✅ |
 | Business rules are free-text knowledge, not **verified, owned rules** | a rule can be wrong and nobody is told | P4 ✅ |
-| No **regression benchmark** per CRM | a change that breaks three answers is only noticed by a user | P6 |
+| No **regression benchmark** per CRM | a change that breaks three answers is only noticed by a user | P6 ✅ |
 
 So: the safety and query machinery is real and complete; the *learning* half is
 what is missing. That is exactly the split the recommendation in the brief
@@ -419,23 +419,58 @@ exposes the draft and the import.
 
 ---
 
-### P6 — A quality bar per CRM
+### P6 — A quality bar per CRM ✅ done
 
 *Goal:* regressions are caught before a user catches them.
 
-*New files:* `src/Services/BenchmarkService.php`, `docs/17-benchmark.md`.
+*What shipped:*
 
-- A benchmark file per CRM: a list of canonical questions with the expected
-  dataset, the expected columns and, where it matters, the expected value.
-- Metrics reported per run:
-  - routing accuracy (right dataset),
-  - column accuracy (the asked-for fields are present),
-  - **id rate** (how many answers still show a key instead of a name),
-  - money correctness (right column, right format, right currency),
-  - permission correctness (a restricted role never sees a forbidden dataset),
-  - freshness (the answer reflects the current data, not a cached plan).
-- The benchmark runs on demand from the admin UI and in CI.
-- A failing benchmark blocks a release of the package.
+- `src/Services/BenchmarkService.php` — `read()`, `template()`, `write()`,
+  `run()`, and the scoring behind them.
+- `docs/17-benchmark.md` — the file format, the six metrics and how to write
+  the questions.
+- API: `benchmark.run`, `benchmark.template`, `benchmark.write`,
+  `benchmark.read`; `service('benchmark')`.
+- Settings `benchmark.file`, `benchmark.output_dir` and `benchmark.id_ceiling`.
+
+The benchmark file is JSON, one per CRM, and it belongs to a business person:
+the questions, the datasets and the values are the CRM's own. The package
+knows none of them.
+
+The run asks the **real assistant** — the same router, plan shaping, compiler
+and read-only runner a user hits — so what is measured is what a user gets.
+The tenant scope, the row scope and the hidden columns apply, which is why a
+restricted role is measured through the permission layer and not around it.
+
+The six metrics:
+
+| Metric | What it measures |
+|---|---|
+| `routing` | the answer came from the dataset it should |
+| `columns` | the answer carries the fields that were asked for, with the right value |
+| `ids` | the answer shows a name, not a key — reported as a rate against a ceiling |
+| `money` | the money column is there and it is money |
+| `permission` | a restricted role saw nothing it may not see |
+| `freshness` | the answer matches the database as it is now, recomputed live |
+
+**A refused answer is not a wrong answer.** When a case names a role and the
+forbidden columns and the assistant answers with nothing — because the
+permission layer removed the column it was asked about — the content checks are
+skipped and only the `permission` check stands. The `money` check flips with
+it: the money column the role may not see has to stay away.
+
+**Freshness is recomputed, never remembered.** The `live` block of a case is
+turned into a real query, with the tenant filter applied when the catalogue
+says the table carries the tenant column, and the answer is compared with it.
+
+*Acceptance:* `tests/benchmark.php` — 54 checks: the file is written and read
+back, a missing file is reported instead of passing silently, the count comes
+from the dataset that was asked for, the sum comes from the money column, a key
+where a name belongs fails the id rate, the wrong dataset fails the routing, a
+restricted role sees nothing forbidden and the case still passes, the metrics
+come out as the six numbers, the template drafts one question per table with
+the value left for a person, and the four API actions answer.
+
 
 ---
 
@@ -464,7 +499,7 @@ Not "the model is clever" — measurable per CRM:
 
 | Measure | Today | Target |
 |---|---|---|
-| Canonical questions answered with the right dataset | unknown (no benchmark) | ≥ 95 % |
+| Canonical questions answered with the right dataset | measurable now, per CRM (P6) | ≥ 95 % |
 | Answers that show a name instead of a key | 100 % on curated packs, unknown elsewhere | ≥ 95 % everywhere |
 | Answers that carry the money column and currency | yes on AMS | 100 % |
 | Answers that respect a restricted role | yes on AMS | 100 %, benchmarked |
@@ -520,3 +555,4 @@ Two rules of thumb:
 - [06 — Data, analysis & charts](06-data-and-charts.md) — the semantic layer and the query guardrails
 - [05 — Knowledge & documents](05-knowledge-and-documents.md) — the knowledge base and retrieval
 - [11 — Governance](11-governance.md) — audit, masking, permissions
+- [17 — Benchmark](17-benchmark.md) — the per-CRM quality bar
