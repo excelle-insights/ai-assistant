@@ -502,6 +502,45 @@ class KnowledgeService implements KnowledgeRetrieverInterface
         return array_map(fn (array $row): array => $this->publicRow($row), $rows);
     }
 
+    /**
+     * Entries of the given categories, newest first.
+     *
+     * A rule base is a named corner of the knowledge table, so it asks for its
+     * own rows instead of reading the whole corpus and filtering afterwards.
+     *
+     * @param string[] $categories
+     * @return array<int,array<string,mixed>>
+     */
+    public function listByCategory(int $companyId, array $categories, int $limit = 500): array
+    {
+        $categories = array_values(array_filter(
+            array_map(static fn ($c): string => trim((string) $c), $categories),
+            static fn (string $c): bool => $c !== '',
+        ));
+        if ($categories === []) {
+            return [];
+        }
+
+        $table = $this->table();
+        $columns = $this->existing($table, array_merge([
+            'id', 'title', 'content', 'category', 'source', 'status', 'scope', 'scope_key',
+            'doc_id', 'pinned', 'updated_by', 'metadata_json', 'created_at', 'updated_at',
+        ], [$this->tenantColumn()]));
+
+        $rows = Db::select(
+            $this->connection(),
+            $table,
+            [$this->tenantColumn() => $companyId, 'category' => $categories],
+            [],
+            [['updated_at', 'desc'], ['id', 'desc']],
+            max(1, $limit),
+            '',
+            $columns === [] ? null : $columns,
+        );
+
+        return array_map(fn (array $row): array => $this->publicRow($row), $rows);
+    }
+
     /** @return array<string,mixed>|null */
     public function find(int $id, int $companyId): ?array
     {

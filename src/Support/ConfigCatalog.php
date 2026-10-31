@@ -747,6 +747,11 @@ final class ConfigCatalog
             'label' => 'How well a question must match a stored report',
             'help' => 'Below this score a stored report is not offered as the way to answer the question.',
         ],
+        'rules.match_threshold' => [
+            'column' => 'operations_json', 'type' => 'float', 'default' => 0.15, 'min' => 0.0, 'max' => 1.0,
+            'label' => 'How well a question must match a business rule',
+            'help' => 'Below this score a rule is not put in front of the router.',
+        ],
     ];
 
     public static function has(string $path): bool

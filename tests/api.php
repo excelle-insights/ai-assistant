@@ -1031,6 +1031,33 @@ okAnswer('handle: query.get', $api->handle('query.get', ['tenant_id' => 7, 'id' 
 okAnswer('handle: query.harvest', $api->handle('query.harvest', ['tenant_id' => 7]));
 okAnswer('handle: query.delete', $api->handle('query.delete', ['tenant_id' => 7, 'id' => $querySave['query']['id']]));
 
+// ─── the rules ────────────────────────────────────────────────────────────────
+
+$ruleTemplate = $api->handle('rule.sheet-template');
+okAnswer('handle: rule.sheet-template', $ruleTemplate);
+check('handle: the sheet has its columns', str_starts_with((string) ($ruleTemplate['csv'] ?? ''), 'module,purpose'), json_encode($ruleTemplate));
+
+$ruleSave = $api->handle('rule.save', ['tenant_id' => 7, 'rule' => [
+    'module' => 'Orders',
+    'purpose' => 'Every order the business took.',
+    'rule' => 'An order is finished when its status is complete.',
+    'owner' => 'Jane Doe',
+]]);
+okAnswer('handle: rule.save', $ruleSave);
+same('handle: the rule was stored', 'Orders', $ruleSave['rule']['module'] ?? '');
+okAnswer('handle: rule.list', $api->handle('rule.list', ['tenant_id' => 7]));
+okAnswer('handle: rule.get', $api->handle('rule.get', ['tenant_id' => 7, 'id' => $ruleSave['rule']['id']]));
+
+$ruleVerified = $api->handle('rule.verify', ['tenant_id' => 7, 'id' => $ruleSave['rule']['id'], 'owner' => 'Jane Doe']);
+okAnswer('handle: rule.verify', $ruleVerified);
+same('handle: the rule is verified', 'verified', $ruleVerified['rule']['verification'] ?? '');
+
+$ruleSheet = $api->handle('rule.sheet-import', ['tenant_id' => 8, 'file' => "module,purpose,operations,tables,key_fields,business_rules,permissions,owner,source_file,status\n"
+    . "\"Bookings\",\"Every booking the business took.\",\"create, confirm\",\"bookings\",\"id, date\",\"A booking is confirmed when it is paid.\",\"Staff confirm bookings.\",\"Jane Doe\",\"modules/bookings.php\",\"draft\""]);
+okAnswer('handle: rule.sheet-import', $ruleSheet);
+same('handle: the sheet row was stored', 1, $ruleSheet['inserted'] ?? 0);
+okAnswer('handle: rule.delete', $api->handle('rule.delete', ['tenant_id' => 7, 'id' => $ruleSave['rule']['id']]));
+
 $noUser = $api->handle('export.create', ['data' => $rows, 'format' => 'csv']);
 badAnswer('handle: needs a user where one is required', $noUser, 'user');
 

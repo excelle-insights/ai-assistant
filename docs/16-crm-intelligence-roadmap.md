@@ -39,7 +39,7 @@ real; nothing here is aspirational fiction.
 | There is no **query library** | the assistant re-derives a calculation the CRM already has a proven report for | P3 ✅ |
 | A key column (`staff_id`) becomes a name only when a pack declares the sibling | on an uncurated CRM the answer says "12" instead of "Jane Wanjiru" | P1 ✅ |
 | There is no **onboarding flow** | installing into a new CRM still needs a human to write the pack | P5 |
-| Business rules are free-text knowledge, not **verified, owned rules** | a rule can be wrong and nobody is told | P4 |
+| Business rules are free-text knowledge, not **verified, owned rules** | a rule can be wrong and nobody is told | P4 ✅ |
 | No **regression benchmark** per CRM | a change that breaks three answers is only noticed by a user | P6 |
 
 So: the safety and query machinery is real and complete; the *learning* half is
@@ -285,24 +285,29 @@ answer cites the one that matched, while another tenant is not offered it.
 
 ---
 
-### P4 — Business rules, owned and verified
+### P4 — Business rules, owned and verified ✅ done
 
 *Goal:* the knowledge base stops being a pile of documents and becomes a set of
 rules somebody is accountable for.
 
-*Changes:*
+*What shipped:*
 
-- Knowledge categories: `module`, `rule`, `glossary`, `calculation`,
-  `permission`, `policy`.
+- `src/Services/RuleService.php` — `list()`, `find()`, `match()`, `save()`,
+  `verify()`, `delete()`, `importSheet()`, `sheetTemplate()`, `promptSection()`.
+- Knowledge categories `module`, `rule`, `glossary`, `calculation`,
+  `permission` and `policy`. The rules live in the knowledge table, so they are
+  retrieved like every other fact and there is no second store to keep in step.
 - Every rule carries an owner, a source link, a verification state
-  (`draft` / `verified`) and a `last_verified` date.
-- The router prompt carries **verified rules first**; drafts are only used when
-  nothing else answers.
-- The admin UI gets a rules table with a one-click "verify" that runs the rule's
-  example question and shows the answer, so verification is a decision, not a
-  promise.
-- A rule that contradicts the data (the example question returns nothing, or
-  returns a number nobody recognises) is flagged for review.
+  (`draft` / `verified`), the date it was last verified, and the question that
+  checks it.
+- The router prompt carries **verified rules first**. A draft is only offered
+  when no verified rule matched, and in the answer the verified rule leads the
+  context while the draft waits.
+- `rule.verify` runs the rule's example question and returns what came back, so
+  verification is a decision with the answer in front of the person making it.
+  A rule that contradicts the data comes back with `needs_review` set.
+- API: `rule.list`, `rule.get`, `rule.save`, `rule.verify`, `rule.delete`,
+  `rule.sheet-template`, `rule.sheet-import`; `service('rules')`.
 
 **The modules and operations sheet.** The scanner discovers modules; a human
 confirms them and fills in what the code cannot say. That confirmation is a
@@ -328,17 +333,26 @@ existing import path:
 Rules of the sheet:
 
 - One row per module **or** per operation, never a mixture, so it can be
-  filtered and sorted.
+  filtered and sorted. A row that names a single operation and no purpose
+  describes that operation; every other row describes the module.
 - The `business_rules` cell holds plain sentences. The assistant reads it as
   knowledge, never as SQL.
 - Import is idempotent: re-importing the sheet updates the rules it owns and
-  leaves everything else alone.
+  drops the ones it no longer has, and leaves everything else alone. The sheet
+  decides what a rule *says*; the person who checked it decides whether it is
+  *true*, so an import never un-verifies a rule.
 - The sheet is optional. A CRM whose modules are clear from the navigation map
   needs only verification, not authorship.
 
-*Acceptance:* every money rule on AMS — PAID vs NOTPAID, `currency_change` as an
-FX adjustment rather than income, deposit vs balance, `hs_state` codes — is a
-verified rule with a source link.
+*Acceptance:* `tests/rules.php` — 61 checks: a rule is stored with its owner
+and its tables, a rule without a name is refused, saving the same module
+updates the row, a document is not a rule, verification records the owner and
+the date, a rule can be sent back to draft, a verified rule outranks a draft,
+the sheet is read column by column, re-importing changes nothing, a row that
+left the sheet is dropped, and another company's rules are never touched.
+`tests/assistant.php` — the router prompt carries the rule and the owner, a
+verified rule leads the answer, a draft waits, and another company is not
+offered the rule.
 
 ---
 

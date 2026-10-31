@@ -23,8 +23,10 @@ use ExcelleInsights\AiAssistant\Dto\QueryResult;
 use ExcelleInsights\AiAssistant\Dto\UserContext;
 use ExcelleInsights\AiAssistant\Services\AssistantService;
 use ExcelleInsights\AiAssistant\Services\ChartService;
+use ExcelleInsights\AiAssistant\Services\KnowledgeService;
 use ExcelleInsights\AiAssistant\Services\QueryCompiler;
 use ExcelleInsights\AiAssistant\Services\QueryLibraryService;
+use ExcelleInsights\AiAssistant\Services\RuleService;
 use ExcelleInsights\AiAssistant\Services\SqlQueryRunner;
 use ExcelleInsights\AiAssistant\Support\Config;
 use ExcelleInsights\AiAssistant\Support\DomainPack;
@@ -436,6 +438,68 @@ $otherReport = (new AssistantService(
     hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
 ))->ask('what is the orders total?', new UserContext('u9', 9, 'web', 'thread-9', []));
 same('report: another company is not offered it', null, $otherReport->meta['report'] ?? null);
+
+// ─── the business rules this CRM follows ──────────────────────────────────────
+
+$pdo->exec('CREATE TABLE `aiask_knowledge` (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, company_id INTEGER NOT NULL, title TEXT, content TEXT,
+    embedding TEXT, source TEXT DEFAULT "manual", status TEXT DEFAULT "active", created_at TEXT,
+    updated_at TEXT, category TEXT, content_hash TEXT, scope TEXT DEFAULT "global", scope_key TEXT,
+    doc_id TEXT, token_count INTEGER, metadata_json TEXT, updated_by TEXT, pinned INTEGER DEFAULT 0)');
+
+$ruleStore = new RuleService(new KnowledgeService($pdo));
+$orderRule = $ruleStore->save(7, [
+    'module' => 'Orders',
+    'purpose' => 'Every order the business took.',
+    'rule' => 'An order is finished when its status is complete.',
+    'owner' => 'Jane Doe',
+]);
+$ruleStore->verify((int) $orderRule['id'], 7, ['owner' => 'Jane Doe']);
+
+$ruleLlm = new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records']]]);
+(new AssistantService(
+    llm: $ruleLlm,
+    pack: $pack,
+    compiler: $compiler,
+    rules: $ruleStore,
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('when is an order finished?', $user);
+
+$rulePrompt = (string) ($ruleLlm->messages[0]['content'] ?? '');
+check('rule: the router was told about the rule', str_contains($rulePrompt, 'Business rules this CRM follows'), $rulePrompt);
+check('rule: it carries the rule itself', str_contains($rulePrompt, 'finished when its status is complete'), $rulePrompt);
+check('rule: it says the vocabulary still decides', str_contains($rulePrompt, 'vocabulary still decides'), $rulePrompt);
+
+// A rule another company owns is not offered to this one.
+$otherRuleLlm = new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records']]]);
+(new AssistantService(
+    llm: $otherRuleLlm,
+    pack: $pack,
+    compiler: $compiler,
+    rules: $ruleStore,
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('when is an order finished?', new UserContext('u9', 9, 'web', 'thread-9', []));
+$otherRulePrompt = (string) ($otherRuleLlm->messages[0]['content'] ?? '');
+check('rule: another company is not offered the rule', !str_contains($otherRulePrompt, 'Business rules this CRM follows'), $otherRulePrompt);
+
+// A verified rule leads the answer; a draft waits for nothing else.
+$bothChunks = new FakeKnowledge([
+    ['id' => 'k1', 'title' => 'Draft rule', 'content' => 'A draft says the order is complete.', 'score' => 0.9, 'metadata' => ['verification' => 'draft']],
+    ['id' => 'k2', 'title' => 'Verified rule', 'content' => 'A verified rule says the order is shipped.', 'score' => 0.5, 'metadata' => ['verification' => 'verified']],
+]);
+$chunkLlm = new ScriptedLlm(['intent' => 'knowledge'], 'The order is shipped.');
+service($chunkLlm, [], new ArrayStore(), null, $bothChunks)->ask('when is an order complete?', $user);
+$grounded = (string) ($chunkLlm->messages[0]['content'] ?? '');
+check('rule: the verified rule leads the answer', str_contains($grounded, 'A verified rule'), $grounded);
+check('rule: and the draft does not', !str_contains($grounded, 'A draft says'), $grounded);
+
+$draftChunks = new FakeKnowledge([
+    ['id' => 'k1', 'title' => 'Draft rule', 'content' => 'A draft says the order is complete.', 'score' => 0.9, 'metadata' => ['verification' => 'draft']],
+]);
+$draftLlm = new ScriptedLlm(['intent' => 'knowledge'], 'It is complete.');
+service($draftLlm, [], new ArrayStore(), null, $draftChunks)->ask('when is an order complete?', $user);
+$draftGrounded = (string) ($draftLlm->messages[0]['content'] ?? '');
+check('rule: a draft answers when nothing else does', str_contains($draftGrounded, 'A draft says'), $draftGrounded);
 
 // ─── scope the model never sees ───────────────────────────────────────────────
 $perms = new ScopedPermissions('customer_id = 42');

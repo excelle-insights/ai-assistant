@@ -47,6 +47,8 @@ config catalogue.
 | `conversations` | `ConversationStore` | conversation persistence |
 | `code` | `CodeIndexService` | replace the code index |
 | `code_scanner` | `CodeScannerInterface` | read the CRM's code with your own scanner |
+| `queries` | `QueryLibraryService` | replace the query library |
+| `rules` | `RuleService` | replace the rule base |
 | `document_store` | `DocumentStoreInterface` | document bytes |
 | `chunk_index` | `ChunkIndexInterface` | document chunk search |
 | `extractors` | array/class | document text extraction (PDF/DOCX/OCR) |
@@ -58,15 +60,16 @@ config catalogue.
 | `on_error` | callable | receives swallowed storage/LLM errors |
 
 `$options` keys: `schema`, `knowledge`, `documents`, `conversations`,
-`assistant`, `semantic`, `channel`, `code`, `settings` (e.g.
+`assistant`, `semantic`, `channel`, `code`, `queries`, `rules`, `settings` (e.g.
 `['enabled' => false]` to keep the DB settings layer out of `Config`).
 
 ```php
 $api->connection();      // ?PDO
 $api->service('audit');  // a built service: llm, policy, schema, knowledge,
-                         // relations, code, documents, export, actions, outbox,
-                         // reports, schedules, feedback, usage, settings,
-                         // configuration, audit, charts, conversations, assistant
+                         // relations, code, queries, rules, documents, export,
+                         // actions, outbox, reports, schedules, feedback, usage,
+                         // settings, configuration, audit, charts, conversations,
+                         // assistant
 $api::VERSION;           // package version string
 ```
 
@@ -253,6 +256,56 @@ When a question matches an active query, the router prompt carries the
 report's name, what it calculates and its rules (never its SQL), and the answer
 cites the report it followed.
 
+### The rules
+
+| Action | Input keys | Returns |
+|---|---|---|
+| `rule.list` | tenant, `filter` | `items` |
+| `rule.get` | tenant, `id` | `rule` |
+| `rule.save` | tenant, `rule` | `rule` |
+| `rule.verify` | tenant, `id`, `owner`, `example_question`, `check` | `rule`, `check` |
+| `rule.delete` | tenant, `id` | `deleted` |
+| `rule.sheet-template` | — | `csv`, `filename`, `columns` |
+| `rule.sheet-import` | tenant, `file` | `inserted`, `updated`, `unchanged`, `removed`, `skipped`, `errors`, `warnings` |
+
+A rule is a business statement somebody is accountable for: what the module is
+for, the rule that decides a row, who owns it, where it came from, and whether
+it has been checked. Rules live in the knowledge table with a category —
+`module`, `rule`, `glossary`, `calculation`, `permission` or `policy` — so they
+are retrieved like every other fact.
+
+Two states matter:
+
+- **draft** — written, not confirmed. It only speaks when nothing else answers.
+- **verified** — checked against the data by its owner. It leads the prompt and
+  the answer.
+
+`rule.verify` is a decision, not a promise: when the rule carries an example
+question, the action asks it and returns what came back in `check`. A rule that
+contradicts the data (the example question returns nothing) comes back with
+`needs_review` set, so it is flagged rather than quietly confirmed.
+
+**The modules and operations sheet.** `rule.sheet-template` returns a CSV with
+the columns `module, purpose, operations, tables, key_fields, business_rules,
+permissions, owner, source_file, status`. One row is one rule: a row that names
+a single operation and no purpose describes that operation, every other row
+describes the module. The `business_rules` cell holds plain sentences — the
+assistant reads it as knowledge, never as SQL.
+
+`rule.sheet-import` is idempotent. Re-importing updates the rules the sheet
+owns and drops the ones it no longer has; every other fact is left alone. The
+sheet decides what a rule *says*; the person who checked it decides whether it
+is *true*, so an import never un-verifies a rule.
+
+The sheet is optional. A CRM whose modules are already clear from the
+navigation map needs verification, not authorship.
+
+Settings (`operations_json`):
+
+| Path | Meaning |
+|---|---|
+| `rules.match_threshold` | How well a question must match a rule (default 0.15) |
+
 ### Reports and schedules
 
 | Action | Input keys | Returns |
@@ -339,6 +392,11 @@ a public method — same envelope, no routing layer.
 `listQueries()`, `getQuery()`, `saveQuery()`, `deleteQuery()`,
 `harvestQueries()`.
 
+### The rules
+
+`listRules()`, `getRule()`, `saveRule()`, `verifyRule()`, `deleteRule()`,
+`ruleSheetTemplate()`, `importRuleSheet()`.
+
 ### Reports and schedules
 
 `createReport()`, `updateReport()`, `deleteReport()`, `getReport()`,
@@ -384,10 +442,10 @@ $api->service('schedules')->nextRuns('0 8 * * *', 5, 'Africa/Nairobi');
 $api->service('configuration')->effective(3);
 ```
 
-Naming: `llm`, `policy`, `schema`, `knowledge`, `relations`, `code`,
-`documents`, `export`, `actions`, `outbox`, `reports`, `schedules`, `feedback`,
-`usage`, `settings`, `configuration`, `audit`, `charts`, `conversations`,
-`assistant`.
+Naming: `llm`, `policy`, `schema`, `knowledge`, `relations`, `code`, `queries`,
+`rules`, `documents`, `export`, `actions`, `outbox`, `reports`, `schedules`,
+`feedback`, `usage`, `settings`, `configuration`, `audit`, `charts`,
+`conversations`, `assistant`.
 
 ---
 
