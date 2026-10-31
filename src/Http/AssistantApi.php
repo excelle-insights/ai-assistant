@@ -35,6 +35,7 @@ use ExcelleInsights\AiAssistant\Services\FeedbackService;
 use ExcelleInsights\AiAssistant\Services\KnowledgeService;
 use ExcelleInsights\AiAssistant\Services\OutboxService;
 use ExcelleInsights\AiAssistant\Services\QueryCompiler;
+use ExcelleInsights\AiAssistant\Services\QueryLibraryService;
 use ExcelleInsights\AiAssistant\Services\RelationService;
 use ExcelleInsights\AiAssistant\Services\ReportService;
 use ExcelleInsights\AiAssistant\Services\SchemaService;
@@ -88,7 +89,7 @@ final class AssistantApi
         'conversations', 'messages', 'knowledge', 'schema', 'reference', 'training',
         'documents', 'document_chunks', 'exports', 'actions', 'action_runs',
         'notification_outbox', 'audit', 'usage_daily', 'settings', 'config',
-        'report_definitions', 'schedules', 'feedback', 'rate_limits', 'relations', 'code_files',
+        'report_definitions', 'schedules', 'feedback', 'rate_limits', 'relations', 'code_files', 'queries',
     ];
     private const LEGACY_TABLES = ['sessions', 'queue'];
 
@@ -146,6 +147,7 @@ final class AssistantApi
             'knowledge' => $this->knowledge(),
             'relations' => $this->relations(),
             'code' => $this->code(),
+            'queries' => $this->queries(),
             'documents' => $this->documents(),
             'export' => $this->exports(),
             'actions' => $this->actions(),
@@ -161,9 +163,9 @@ final class AssistantApi
             'conversations' => $this->conversations(),
             'assistant' => $this->assistant(),
             default => throw new InvalidArgumentException(
-                'Unknown service "' . $name . '". Known: llm, policy, schema, knowledge, relations, code, documents, '
-                . 'export, actions, outbox, reports, schedules, feedback, usage, settings, configuration, audit, charts, '
-                . 'conversations, assistant.'
+                'Unknown service "' . $name . '". Known: llm, policy, schema, knowledge, relations, code, queries, '
+                . 'documents, export, actions, outbox, reports, schedules, feedback, usage, settings, configuration, '
+                . 'audit, charts, conversations, assistant.'
             ),
         };
     }
@@ -760,6 +762,72 @@ final class AssistantApi
             }
 
             return ['items' => $this->code()->knownQueries($tenantId, $question, max(1, (int) ($opts['k'] ?? 5)))];
+        });
+    }
+
+    // ─── the query library ────────────────────────────────────────────────────
+
+    /**
+     * The calculations this CRM already has, by name.
+     *
+     * @param array<string,mixed> $filter status, module, limit
+     */
+    public function listQueries(int $tenantId, array $filter = []): array
+    {
+        return $this->wrap(fn (): array => ['items' => $this->queries()->list($tenantId, $filter)]);
+    }
+
+    /** One stored query. */
+    public function getQuery(int $tenantId, int $id): array
+    {
+        return $this->wrap(function () use ($tenantId, $id): array {
+            $query = $this->queries()->find($id, $tenantId);
+            if ($query === null) {
+                return ['ok' => false, 'code' => 'not_found', 'error' => 'No such query for this company.'];
+            }
+
+            return ['query' => $query];
+        });
+    }
+
+    /**
+     * Store a query: a name, what it calculates, and the statement behind it.
+     *
+     * @param array<string,mixed> $query
+     */
+    public function saveQuery(int $tenantId, array $query, ?string $updatedBy = null): array
+    {
+        return $this->wrap(fn (): array => ['query' => $this->queries()->save($tenantId, $query, $updatedBy)]);
+    }
+
+    /** Forget a query. */
+    public function deleteQuery(int $tenantId, int $id): array
+    {
+        return $this->wrap(function () use ($tenantId, $id): array {
+            if (!$this->queries()->delete($id, $tenantId)) {
+                return ['ok' => false, 'code' => 'not_found', 'error' => 'No such query for this company.'];
+            }
+
+            return ['deleted' => $id];
+        });
+    }
+
+    /**
+     * Offer the queries the code scan found as proposals.
+     *
+     * A query somebody already described is left alone: their wording is
+     * theirs, and a later scan must not overwrite it.
+     */
+    public function harvestQueries(int $tenantId, ?string $updatedBy = null): array
+    {
+        return $this->wrap(function () use ($tenantId, $updatedBy): array {
+            $statements = $this->code()->statements($tenantId, 500);
+            if ($statements === []) {
+                return ['harvest' => ['created' => 0, 'skipped' => 0, 'items' => []],
+                    'note' => 'The code index holds nothing yet. Run code.scan first.'];
+            }
+
+            return ['harvest' => $this->queries()->harvest($tenantId, $statements, $updatedBy)];
         });
     }
 
@@ -1548,6 +1616,14 @@ final class AssistantApi
             ));
     }
 
+    /** The calculations this CRM already has, by name. */
+    private function queries(): QueryLibraryService
+    {
+        /** @var QueryLibraryService */
+        return $this->made('queries', fn () => $this->given('queries', QueryLibraryService::class)
+            ?? new QueryLibraryService($this->pdo, (array) ($this->options['queries'] ?? [])));
+    }
+
     private function documents(): DocumentService
     {
         /** @var DocumentService */
@@ -1810,6 +1886,7 @@ final class AssistantApi
             hooks: array_merge($hooks, array_filter((array) ($this->services['hooks'] ?? []), 'is_callable')),
             options: (array) ($this->options['assistant'] ?? []),
             code: $this->pdo !== null ? $this->code() : null,
+            queries: $this->pdo !== null ? $this->queries() : null,
         );
     }
 
@@ -2165,6 +2242,18 @@ final class AssistantApi
             'code.scan' => fn (): array => $this->scanCode($tenant(), (array) ($input['options'] ?? [])),
             'code.files' => fn (): array => $this->codeFiles($tenant()),
             'code.queries' => fn (): array => $this->codeQueries($tenant(), (array) ($input['options'] ?? [])),
+            'query.list' => fn (): array => $this->listQueries($tenant(), (array) ($input['filter'] ?? [])),
+            'query.get' => fn (): array => $this->getQuery($tenant(), (int) ($input['id'] ?? 0)),
+            'query.save' => fn (): array => $this->saveQuery(
+                $tenant(),
+                (array) ($input['query'] ?? $input),
+                isset($input['updated_by']) ? (string) $input['updated_by'] : $user?->userId
+            ),
+            'query.delete' => fn (): array => $this->deleteQuery($tenant(), (int) ($input['id'] ?? 0)),
+            'query.harvest' => fn (): array => $this->harvestQueries(
+                $tenant(),
+                isset($input['updated_by']) ? (string) $input['updated_by'] : $user?->userId
+            ),
             'report.list' => fn (): array => $this->listReports($tenant(), isset($input['folder']) ? (string) $input['folder'] : null, $user),
             'report.run' => fn (): array => $this->runReport((string) ($input['id'] ?? ''), (array) ($input['params'] ?? []), $user),
             'schedule.create' => fn (): array => $this->createSchedule((array) $input),

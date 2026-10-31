@@ -742,6 +742,11 @@ final class ConfigCatalog
             'label' => 'Navigation map files',
             'help' => 'Files that list the modules, when they do not follow the usual names.',
         ],
+        'queries.match_threshold' => [
+            'column' => 'operations_json', 'type' => 'float', 'default' => 0.2, 'min' => 0.0, 'max' => 1.0,
+            'label' => 'How well a question must match a stored report',
+            'help' => 'Below this score a stored report is not offered as the way to answer the question.',
+        ],
     ];
 
     public static function has(string $path): bool

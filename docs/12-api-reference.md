@@ -230,6 +230,29 @@ Settings (`operations_json`):
 | `code.max_depth` | How deep to walk (default 8) |
 | `code.navigation` | Navigation map files, when they do not follow the usual names |
 
+### The query library
+
+| Action | Input keys | Returns |
+|---|---|---|
+| `query.list` | tenant, `filter` | `items` |
+| `query.get` | tenant, `id` | `query` |
+| `query.save` | tenant, `query` | `query` |
+| `query.delete` | tenant, `id` | `deleted` |
+| `query.harvest` | tenant | `harvest` |
+
+A stored query is a calculation the CRM already has, kept by name: what it
+calculates in business language, the tables it touches, the file it came from.
+`query.harvest` offers the queries the code scan found as **proposals** — a
+person confirms one, describes it and activates it, and from then on the
+assistant answers that family of questions the way the business does.
+
+Only an **active** query steers the assistant. A proposal is a candidate, not a
+decision: until somebody activates it, it changes nothing.
+
+When a question matches an active query, the router prompt carries the
+report's name, what it calculates and its rules (never its SQL), and the answer
+cites the report it followed.
+
 ### Reports and schedules
 
 | Action | Input keys | Returns |
@@ -310,6 +333,11 @@ a public method — same envelope, no routing layer.
 
 `listRelations()`, `discoverRelations()`, `approveRelation()`,
 `rejectRelation()`, `scanCode()`, `codeFiles()`, `codeQueries()`.
+
+### The query library
+
+`listQueries()`, `getQuery()`, `saveQuery()`, `deleteQuery()`,
+`harvestQueries()`.
 
 ### Reports and schedules
 
