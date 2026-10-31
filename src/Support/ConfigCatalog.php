@@ -763,6 +763,22 @@ final class ConfigCatalog
             'label' => 'Canonical questions',
             'help' => 'The questions the install proves itself against. Empty = one per dataset.',
         ],
+        'benchmark.file' => [
+            'column' => 'operations_json', 'type' => 'string', 'default' => '',
+            'label' => 'The benchmark file',
+            'help' => 'The JSON file holding the questions this CRM must keep answering.',
+        ],
+        'benchmark.output_dir' => [
+            'column' => 'operations_json', 'type' => 'string', 'default' => '',
+            'label' => 'Where the benchmark file is written',
+            'help' => 'The folder ai-assistant.benchmark.json is written to. Empty = nothing is written.',
+        ],
+        'benchmark.id_ceiling' => [
+            'column' => 'operations_json', 'type' => 'float', 'default' => 0.5, 'min' => 0.0, 'max' => 1.0,
+            'label' => 'How many key columns an answer may show',
+            'help' => 'The share of a result\'s columns that may be keys (id, staff_id) rather than names. '
+                . 'Above this the answer fails: it should show who, not which row.',
+        ],
     ];
 
     public static function has(string $path): bool

@@ -25,6 +25,7 @@ use ExcelleInsights\AiAssistant\Extractors\ExtractorRegistry;
 use ExcelleInsights\AiAssistant\Services\ActionService;
 use ExcelleInsights\AiAssistant\Services\AssistantService;
 use ExcelleInsights\AiAssistant\Services\AuditService;
+use ExcelleInsights\AiAssistant\Services\BenchmarkService;
 use ExcelleInsights\AiAssistant\Services\ChartService;
 use ExcelleInsights\AiAssistant\Services\CodeIndexService;
 use ExcelleInsights\AiAssistant\Services\ConfigService;
@@ -152,6 +153,7 @@ final class AssistantApi
             'queries' => $this->queries(),
             'rules' => $this->rules(),
             'discovery' => $this->discovery(),
+            'benchmark' => $this->benchmark(),
             'documents' => $this->documents(),
             'export' => $this->exports(),
             'actions' => $this->actions(),
@@ -168,7 +170,7 @@ final class AssistantApi
             'assistant' => $this->assistant(),
             default => throw new InvalidArgumentException(
                 'Unknown service "' . $name . '". Known: llm, policy, schema, knowledge, relations, code, queries, '
-                . 'rules, discovery, documents, export, actions, outbox, reports, schedules, feedback, usage, settings, '
+                . 'rules, discovery, benchmark, documents, export, actions, outbox, reports, schedules, feedback, usage, settings, '
                 . 'configuration, audit, charts, conversations, assistant.'
             ),
         };
@@ -1002,6 +1004,47 @@ final class AssistantApi
         return $this->wrap(fn (): array => $this->discovery()->importKnowledgeFile($tenantId, $path, $updatedBy));
     }
 
+    // ─── the quality bar ──────────────────────────────────────────────────────
+
+    /**
+     * Run the CRM's benchmark: the canonical questions, answered and scored.
+     *
+     * @param array<string,mixed> $opts file, questions, id_ceiling
+     */
+    public function benchmarkRun(int $tenantId, array $opts = []): array
+    {
+        return $this->wrap(fn (): array => ['benchmark' => $this->benchmark()->run($tenantId, $opts)]);
+    }
+
+    /**
+     * A starter benchmark: one question per table the CRM has.
+     *
+     * The datasets are known; the values are for a person to fill in.
+     *
+     * @param array<string,mixed> $opts crm
+     */
+    public function benchmarkTemplate(int $tenantId, array $opts = []): array
+    {
+        return $this->wrap(fn (): array => ['benchmark' => $this->benchmark()->template($tenantId, $opts)]);
+    }
+
+    /**
+     * Write the benchmark file the CRM keeps.
+     *
+     * @param array<string,mixed> $benchmark
+     * @param array<string,mixed> $opts output_dir, file
+     */
+    public function benchmarkWrite(int $tenantId, array $benchmark, array $opts = []): array
+    {
+        return $this->wrap(fn (): array => $this->benchmark()->write($benchmark, $opts));
+    }
+
+    /** Read the benchmark file, as it is now. */
+    public function benchmarkRead(string $path): array
+    {
+        return $this->wrap(fn (): array => $this->benchmark()->read($path));
+    }
+
     // ─── schema learning ──────────────────────────────────────────────────────
 
     /** Mirror the live structure into the catalog, keeping human descriptions. */
@@ -1819,6 +1862,19 @@ final class AssistantApi
             ));
     }
 
+    private function benchmark(): BenchmarkService
+    {
+        /** @var BenchmarkService */
+        return $this->made('benchmark', fn () => $this->given('benchmark', BenchmarkService::class)
+            ?? new BenchmarkService(
+                $this->pdo,
+                $this->schema(),
+                $this->policy(),
+                fn (string $question, UserContext $user): array => $this->assistant($user)->ask($question, $user)->toArray(),
+                (array) ($this->options['benchmark'] ?? []),
+            ));
+    }
+
     private function documents(): DocumentService
     {
         /** @var DocumentService */
@@ -2472,6 +2528,14 @@ final class AssistantApi
                 (string) ($input['path'] ?? $input['file'] ?? ''),
                 isset($input['updated_by']) ? (string) $input['updated_by'] : $user?->userId
             ),
+            'benchmark.run' => fn (): array => $this->benchmarkRun($tenant(), (array) ($input['options'] ?? [])),
+            'benchmark.template' => fn (): array => $this->benchmarkTemplate($tenant(), (array) ($input['options'] ?? [])),
+            'benchmark.write' => fn (): array => $this->benchmarkWrite(
+                $tenant(),
+                (array) ($input['benchmark'] ?? []),
+                (array) ($input['options'] ?? [])
+            ),
+            'benchmark.read' => fn (): array => $this->benchmarkRead((string) ($input['path'] ?? $input['file'] ?? '')),
             'report.list' => fn (): array => $this->listReports($tenant(), isset($input['folder']) ? (string) $input['folder'] : null, $user),
             'report.run' => fn (): array => $this->runReport((string) ($input['id'] ?? ''), (array) ($input['params'] ?? []), $user),
             'schedule.create' => fn (): array => $this->createSchedule((array) $input),

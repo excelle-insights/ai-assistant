@@ -30,6 +30,7 @@ depends on a specific messaging vendor.
 | 14 | [Troubleshooting](14-troubleshooting.md) | Failures you will actually see, and what they mean |
 | 15 | [Bookings](15-bookings.md) | Package-owned bookings, booking numbers, per-contact recall, host actions |
 | 16 | [CRM intelligence roadmap](16-crm-intelligence-roadmap.md) | What the package already knows about a CRM, what is missing, and the phase plan for learning a CRM by itself |
+| 17 | [Benchmark](17-benchmark.md) | The per-CRM quality bar: canonical questions, the six metrics, how a run is scored |
 
 These guides are the current contract. `BLACKBOX_DECOUPLING_PROPOSAL.md` in the
 repository root is a historical design note; where the two disagree, `docs/`
