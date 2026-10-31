@@ -306,6 +306,59 @@ Settings (`operations_json`):
 |---|---|
 | `rules.match_threshold` | How well a question must match a rule (default 0.15) |
 
+### The install — read a CRM and draft its vocabulary
+
+| Action | Input keys | Returns |
+|---|---|---|
+| `discover.run` | tenant, `options` | `discovery` |
+| `discover.draft` | tenant | `pack`, `knowledge` |
+| `discover.knowledge-import` | tenant, `path`, `updated_by` | `loaded`, `created`, `updated`, `unchanged`, `errors` |
+
+A hand-written pack takes a week per application and goes stale the day
+after. `discover.run` does the first half of that work by machine: it reads the
+database, reads the code the application already runs, and turns both into a
+named vocabulary — a dataset per table, a metric per measure, the name behind
+every key a verified relation explains.
+
+The run has six steps and each one is recorded separately:
+
+| Step | What it does |
+|---|---|
+| `schema` | Syncs the catalogue with the live database |
+| `code` | Scans the application for the queries it runs |
+| `relations` | Looks for the key columns that point at another table |
+| `pack` | Drafts the semantic layer from the catalogue and the relations |
+| `knowledge` | Drafts the modules, the rules and the glossary from the code |
+| `files` | Writes the two JSON files |
+| `selftest` | Answers the canonical questions and shows the SQL |
+
+A step that fails is recorded in `errors`; it never stops the run.
+
+What it writes is two JSON files, not PHP:
+
+- `ai-assistant.packs.json` — the semantic layer, in the shape of any other
+  pack. The host commits it and points `semantic.pack_file` at it.
+- `ai-assistant.knowledge.json` — the modules, the rules and the glossary that
+  were found. `discover.knowledge-import` loads it into the knowledge base;
+  importing twice changes nothing.
+
+Every rule found in code is a **draft**. The code says what it does, but only a
+person can say whether that is the business rule, so the drafted rules arrive
+without an owner and wait in the rules screen.
+
+The self-test is the proof: each canonical question is routed to a dataset,
+compiled through the real compiler (so the tenant scope and the table policy
+apply) and run, and the answer carries the SQL that was executed. The questions
+are the host's own when it configured some, otherwise one per dataset, so every
+table is proved at least once.
+
+Settings (`operations_json`):
+
+| Path | Meaning |
+|---|---|
+| `discovery.output_dir` | Where the two files are written (empty = the draft is returned, nothing is written) |
+| `discovery.questions` | The questions the install proves itself against |
+
 ### Reports and schedules
 
 | Action | Input keys | Returns |
@@ -397,6 +450,10 @@ a public method — same envelope, no routing layer.
 `listRules()`, `getRule()`, `saveRule()`, `verifyRule()`, `deleteRule()`,
 `ruleSheetTemplate()`, `importRuleSheet()`.
 
+### The install
+
+`discover()`, `discoverDraft()`, `importDiscoveryKnowledge()`.
+
 ### Reports and schedules
 
 `createReport()`, `updateReport()`, `deleteReport()`, `getReport()`,
@@ -443,8 +500,8 @@ $api->service('configuration')->effective(3);
 ```
 
 Naming: `llm`, `policy`, `schema`, `knowledge`, `relations`, `code`, `queries`,
-`rules`, `documents`, `export`, `actions`, `outbox`, `reports`, `schedules`,
-`feedback`, `usage`, `settings`, `configuration`, `audit`, `charts`,
+`rules`, `discovery`, `documents`, `export`, `actions`, `outbox`, `reports`,
+`schedules`, `feedback`, `usage`, `settings`, `configuration`, `audit`, `charts`,
 `conversations`, `assistant`.
 
 ---

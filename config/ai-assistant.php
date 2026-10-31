@@ -173,6 +173,19 @@ return [
         'vocab_chars' => (int) $env(['AI_ASSISTANT_VOCAB_CHARS'], 12000),
     ],
 
+    // ── The install (read a CRM, draft its vocabulary, write it down) ───────
+    // A run of discover.run reads the database and the code, drafts the
+    // semantic layer and writes two JSON files. The host commits them; the
+    // packs file is read back like any other pack.
+    'discovery' => [
+        // Where the two files are written. Empty = the draft is returned but
+        // nothing is written, so a host decides where its repository lives.
+        'output_dir' => (string) $env(['AI_ASSISTANT_DISCOVERY_OUTPUT_DIR'], ''),
+        // The questions the install proves itself against. Empty = one per
+        // dataset, so every table is answered at least once.
+        'questions' => $csv($env(['AI_ASSISTANT_DISCOVERY_QUESTIONS'])),
+    ],
+
     // ── Charts (visualisation of any result set) ─────────────────────────────
     // Every key here is a shape hint the ChartService reads; empty/omitted means
     // its own default. Types not listed stay disabled only if you list some.

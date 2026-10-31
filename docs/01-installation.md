@@ -131,6 +131,30 @@ $api->handle('config.save', ['company_id' => 0, 'settings' => [
 The table starts empty: no row means "use the defaults", so this step is
 optional. Full reference: [03 — Configuration](03-configuration.md#settings-in-the-database).
 
+## Installing into a new CRM
+
+The package describes any application by reading it, not by being told about it.
+One admin call reads the database, reads the code and drafts the vocabulary:
+
+```php
+$api = new \ExcelleInsights\AiAssistant\Http\AssistantApi($pdo);
+$api->handle('discover.run', ['company_id' => 1, 'options' => [
+    'code' => ['paths' => ['/var/www/app/admin']],   // the folders that hold the application
+    'files' => ['output_dir' => '/var/www/app/ai-assistant'],
+]]);
+```
+
+It writes two JSON files — `ai-assistant.packs.json` (the semantic layer) and
+`ai-assistant.knowledge.json` (the modules, rules and glossary it found) — and
+answers a canonical question set against the draft, with the SQL, so the admin
+sees what the assistant would say before anyone relies on it. Point
+`semantic.pack_file` at the pack file and the assistant reads it like any other
+pack.
+
+Nothing is written to the CRM itself, and every step is recorded separately, so
+a part that cannot be read does not cost the rest of the install. Full
+reference: [12 — API reference](12-api-reference.md#the-install--read-a-crm-and-draft-its-vocabulary).
+
 ## Upgrading
 
 ```bash
