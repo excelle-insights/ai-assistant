@@ -37,7 +37,7 @@ real; nothing here is aspirational fiction.
 |---|---|---|
 | The host's **source code** is never read | business rules that only live in PHP (how "paid" is decided, how a balance is computed) are invisible to the assistant | P2 |
 | There is no **query library** | the assistant re-derives a calculation the CRM already has a proven report for | P3 |
-| A key column (`staff_id`) becomes a name only when a pack declares the sibling | on an uncurated CRM the answer says "12" instead of "Jane Wanjiru" | P1 |
+| A key column (`staff_id`) becomes a name only when a pack declares the sibling | on an uncurated CRM the answer says "12" instead of "Jane Wanjiru" | P1 ✅ |
 | There is no **onboarding flow** | installing into a new CRM still needs a human to write the pack | P5 |
 | Business rules are free-text knowledge, not **verified, owned rules** | a rule can be wrong and nobody is told | P4 |
 | No **regression benchmark** per CRM | a change that breaks three answers is only noticed by a user | P6 |
@@ -104,15 +104,15 @@ name column", "labels: a question that asks for the id keeps the key".
 
 ---
 
-### P1 — Keys become names without a curated pack
+### P1 — Keys become names without a curated pack ✅ done
 
 *Goal:* on a CRM nobody has described yet, "which agent collected the most"
 still answers with names.
 
-*New file:* `src/Support/RelationResolver.php`
+*New file:* `src/Services/RelationService.php`, table `{prefix}_relations`.
 
-1. For every dimension whose column is a key (`*_id`, `*_uuid`), propose lookup
-   candidates, in this order:
+1. For every dimension whose column is a key (`*_id`, `*_uuid`, anything the
+   catalogue calls an id), propose lookup candidates, in this order:
    - a declared foreign key (`SchemaService::foreignKeys()`),
    - the convention (`staff_id` → `staff`, `staff`, `users`),
    - **value overlap**: sample distinct key values and check how many exist in
@@ -125,6 +125,23 @@ still answers with names.
    `full_name`, `label`, `username`, in that order).
 4. Relations live in the catalog, are reviewable in the admin UI, and can be
    rejected. A rejected relation never comes back.
+
+*What shipped:*
+
+- `services/RelationService.php` — discovery, review and storage.
+- `Support\DomainPack` takes `relations` and `allowed_tables`, and turns each
+  verified relation into a `<fk>_name` dimension plus the join that feeds it. A
+  curated pack always wins: a dataset that already declares the name keeps its
+  own column.
+- `Support\SchemaHints::referenceBase()` — one definition of what a key column
+  points at.
+- `AssistantApi` actions `relation.list` / `relation.discover` /
+  `relation.approve` / `relation.reject`; the pack is rebuilt per company so a
+  company's own relations apply.
+- A masked or encrypted column is never used as the label, so an answer never
+  shows ciphertext where a name should be.
+- Every answer carries the relations it leaned on, so a name is traceable to
+  the relation that produced it.
 
 *Acceptance:* on a pack-free CRM, a "who" question returns a name for ≥ 95 % of
 rows, and every returned name can be traced to a relation the admin approved.

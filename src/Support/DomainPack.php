@@ -50,13 +50,16 @@ final class DomainPack
     private array $catalog;
     private int $maxDimensions;
     private int $maxMetrics;
+    /** @var array<string,array<string,mixed>> source table.column => relation */
+    private array $relations = [];
 
     private const AGGREGATES = ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'];
 
     /**
      * @param array<int,array<string,mixed>> $packs   host-authored packs
      * @param array<string,array<string,mixed>> $catalog SchemaService::catalog() output
-     * @param array<string,mixed> $options auto_derive, max_dimensions, max_datasets
+     * @param array<string,mixed> $options auto_derive, max_dimensions, max_datasets,
+     *        relations (approved key-to-name relations), allowed_tables
      */
     public function __construct(array $packs = [], array $catalog = [], array $options = [])
     {
@@ -72,6 +75,10 @@ final class DomainPack
         if ($autoDerive) {
             $this->deriveFromCatalog((int) ($options['max_datasets'] ?? Config::int('semantic.max_datasets', 80)));
         }
+        $this->applyRelations(
+            (array) ($options['relations'] ?? []),
+            array_values(array_filter(array_map('strval', (array) ($options['allowed_tables'] ?? [])))),
+        );
     }
 
     /**
@@ -483,6 +490,7 @@ final class DomainPack
             'datasets' => $this->listDatasets(),
             'entities' => array_values($this->entities),
             'actions' => array_values($this->actions),
+            'relations' => array_values($this->relations),
             'packs' => count($this->packs),
         ];
     }
@@ -602,6 +610,7 @@ final class DomainPack
                 'metrics' => $metrics,
                 'dimensions' => $dimensions,
                 'joins' => [],
+                'relations' => [],
                 'tenant_scoped' => true,
                 'default_order' => '',
                 'source' => 'auto',
@@ -621,6 +630,172 @@ final class DomainPack
             ];
             $added++;
         }
+    }
+
+    /**
+     * Approved relations turn key columns into readable names: a dataset that
+     * carries `staff_id` gains a `staff_name` sibling, joined from the table
+     * the key points at.
+     *
+     * A curated pack always wins: a dataset that already declares the name
+     * keeps its own column and expression.
+     *
+     * @param array<int,array<string,mixed>> $relations
+     * @param string[]                       $allowedTables tables the host allows us to read
+     */
+    private function applyRelations(array $relations, array $allowedTables): void
+    {
+        if ($relations === []) {
+            return;
+        }
+        $allowed = array_map(static fn (string $t): string => strtolower(trim($t)), $allowedTables);
+        $ordered = array_values(array_filter($relations, 'is_array'));
+        usort($ordered, static fn (array $a, array $b): int => (float) ($b['confidence'] ?? 0) <=> (float) ($a['confidence'] ?? 0));
+
+        $added = 0;
+        foreach ($ordered as $relation) {
+            $sourceTable = trim((string) ($relation['source_table'] ?? ''));
+            $sourceColumn = trim((string) ($relation['source_column'] ?? ''));
+            $targetTable = trim((string) ($relation['target_table'] ?? ''));
+            $targetColumn = trim((string) ($relation['target_column'] ?? 'id')) ?: 'id';
+            $labelColumn = trim((string) ($relation['label_column'] ?? ''));
+            if ($sourceTable === '' || $sourceColumn === '' || $targetTable === '' || $labelColumn === '') {
+                continue;
+            }
+            if ($allowed !== [] && !in_array(strtolower($targetTable), $allowed, true)) {
+                continue;
+            }
+            $base = SchemaHints::referenceBase($sourceColumn);
+            if ($base === '') {
+                continue;
+            }
+            $dataset = $this->datasetForTable($sourceTable);
+            if ($dataset === null) {
+                continue;
+            }
+            $key = $dataset['key'];
+            if (count((array) ($dataset['relations'] ?? [])) >= 6) {
+                continue;
+            }
+
+            $name = $base . '_name';
+            if ($this->hasDimension($dataset, $name)) {
+                continue;
+            }
+            $alias = $this->joinAliasFor($dataset, $targetTable);
+            $prefix = $alias ?? $targetTable;
+            if ($this->hasDimensionColumn($dataset, $prefix . '.' . $labelColumn)) {
+                continue;
+            }
+
+            if ($alias === null) {
+                $dataset['joins'][] = [
+                    'table' => $targetTable,
+                    'alias' => $targetTable,
+                    'on' => [$dataset['table'] . '.' . $sourceColumn => $targetTable . '.' . $targetColumn],
+                    'type' => 'left',
+                ];
+            }
+
+            $dataset['dimensions'][] = [
+                'name' => $name,
+                'label' => $this->relationLabel($targetTable) . ' name',
+                'column' => $prefix . '.' . $labelColumn,
+                'expr' => '',
+                'format' => 'text',
+                'via' => $prefix,
+                'aliases' => [],
+                'description' => 'The name behind ' . $dataset['table'] . '.' . $sourceColumn . '.',
+            ];
+            $dataset['relations'][] = [
+                'name' => $name,
+                'source' => $dataset['table'] . '.' . $sourceColumn,
+                'target' => $targetTable . '.' . $labelColumn,
+                'method' => (string) ($relation['method'] ?? ''),
+                'confidence' => (float) ($relation['confidence'] ?? 0),
+            ];
+            $this->relations[$dataset['table'] . '.' . $sourceColumn] = $relation;
+            $this->datasets[$key] = $dataset;
+            $added++;
+        }
+    }
+
+    /** The dataset that reads from a table, if there is one. @return array<string,mixed>|null */
+    private function datasetForTable(string $table): ?array
+    {
+        $wanted = strtolower(trim($table));
+        foreach ($this->datasets as $dataset) {
+            if (strtolower((string) ($dataset['table'] ?? '')) === $wanted) {
+                return $dataset;
+            }
+        }
+        return null;
+    }
+
+    /** @param array<string,mixed> $dataset */
+    private function hasDimension(array $dataset, string $name): bool
+    {
+        foreach ((array) ($dataset['dimensions'] ?? []) as $dimension) {
+            if (is_array($dimension) && self::key((string) ($dimension['name'] ?? '')) === self::key($name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** @param array<string,mixed> $dataset */
+    private function hasDimensionColumn(array $dataset, string $column): bool
+    {
+        foreach ((array) ($dataset['dimensions'] ?? []) as $dimension) {
+            if (is_array($dimension) && strcasecmp((string) ($dimension['column'] ?? ''), $column) === 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The alias a dataset already joins the target table under, if it does. */
+    private function joinAliasFor(array $dataset, string $table): ?string
+    {
+        $wanted = self::key($table);
+        foreach ((array) ($dataset['joins'] ?? []) as $join) {
+            if (!is_array($join)) {
+                continue;
+            }
+            if (self::key((string) ($join['table'] ?? '')) === $wanted) {
+                return (string) ($join['alias'] ?? $join['table']);
+            }
+        }
+        return null;
+    }
+
+    /** The readable name of the table a key points at. */
+    private function relationLabel(string $table): string
+    {
+        foreach ($this->catalog as $name => $entry) {
+            if (strcasecmp((string) $name, $table) === 0) {
+                $label = trim((string) ($entry['label'] ?? ''));
+                if ($label !== '') {
+                    return $label;
+                }
+            }
+        }
+        return SchemaHints::label($table);
+    }
+
+    /**
+     * The relations a dataset leans on, for the admin and the answer's audit
+     * trail: every name in an answer is traceable to the relation that made it.
+     *
+     * @return array<int,array<string,mixed>>
+     */
+    public function relationNotes(string $dataset): array
+    {
+        $entry = $this->dataset($dataset);
+        if ($entry === null) {
+            return [];
+        }
+        return array_values((array) ($entry['relations'] ?? []));
     }
 
     /** @param array<string,mixed> $raw @return array<string,mixed>|null */
@@ -668,6 +843,7 @@ final class DomainPack
             'metrics' => $metrics,
             'dimensions' => $dimensions,
             'joins' => array_values(array_filter((array) ($raw['joins'] ?? []), 'is_array')),
+            'relations' => [],
             'tenant_scoped' => (bool) ($raw['tenant_scoped'] ?? true),
             'default_order' => trim((string) ($raw['default_order'] ?? '')),
             'source' => 'pack',

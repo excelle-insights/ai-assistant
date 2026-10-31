@@ -243,6 +243,21 @@ final class SchemaHints
         return $c === 'id' || str_ends_with($c, '_id') || str_ends_with($c, '_uuid');
     }
 
+    /**
+     * The thing a key column points at: "staff_id" → "staff", "officer" → "officer".
+     */
+    public static function referenceBase(string $column): string
+    {
+        $c = strtolower(trim($column));
+        if (str_contains($c, '.')) {
+            $parts = explode('.', $c);
+            $c = (string) end($parts);
+        }
+        $base = (string) preg_replace('/_(id|uuid)$/', '', $c);
+
+        return $base === 'id' || $base === 'uuid' ? '' : $base;
+    }
+
     /** Measures can be summed/averaged; identifiers and counts-of-things-that-are-not-metrics cannot. */
     public static function isMeasure(string $column, string $type): bool
     {

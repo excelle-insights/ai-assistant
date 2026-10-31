@@ -622,6 +622,9 @@ final class AssistantService
     {
         $compiled = $compiler->compile($queryPlan, $this->scopeFor($queryPlan, $request->user));
         $compiled['plan'] = $plan;
+        // The relations behind the names in this answer, so every name is
+        // traceable to the relation that produced it.
+        $compiled['relations'] = $this->pack?->relationNotes((string) ($compiled['dataset'] ?? '')) ?? [];
 
         return $compiled;
     }

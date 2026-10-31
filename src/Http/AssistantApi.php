@@ -33,6 +33,7 @@ use ExcelleInsights\AiAssistant\Services\FeedbackService;
 use ExcelleInsights\AiAssistant\Services\KnowledgeService;
 use ExcelleInsights\AiAssistant\Services\OutboxService;
 use ExcelleInsights\AiAssistant\Services\QueryCompiler;
+use ExcelleInsights\AiAssistant\Services\RelationService;
 use ExcelleInsights\AiAssistant\Services\ReportService;
 use ExcelleInsights\AiAssistant\Services\SchemaService;
 use ExcelleInsights\AiAssistant\Services\SettingsService;
@@ -85,7 +86,7 @@ final class AssistantApi
         'conversations', 'messages', 'knowledge', 'schema', 'reference', 'training',
         'documents', 'document_chunks', 'exports', 'actions', 'action_runs',
         'notification_outbox', 'audit', 'usage_daily', 'settings', 'config',
-        'report_definitions', 'schedules', 'feedback', 'rate_limits',
+        'report_definitions', 'schedules', 'feedback', 'rate_limits', 'relations',
     ];
     private const LEGACY_TABLES = ['sessions', 'queue'];
 
@@ -141,6 +142,7 @@ final class AssistantApi
             'policy' => $this->policy(),
             'schema' => $this->schema(),
             'knowledge' => $this->knowledge(),
+            'relations' => $this->relations(),
             'documents' => $this->documents(),
             'export' => $this->exports(),
             'actions' => $this->actions(),
@@ -156,7 +158,7 @@ final class AssistantApi
             'conversations' => $this->conversations(),
             'assistant' => $this->assistant(),
             default => throw new InvalidArgumentException(
-                'Unknown service "' . $name . '". Known: llm, policy, schema, knowledge, documents, export, '
+                'Unknown service "' . $name . '". Known: llm, policy, schema, knowledge, relations, documents, export, '
                 . 'actions, outbox, reports, schedules, feedback, usage, settings, configuration, audit, charts, '
                 . 'conversations, assistant.'
             ),
@@ -238,7 +240,11 @@ final class AssistantApi
     /** Compiled SQL and scope for a plan, executed by nobody. */
     public function explain(array $plan, UserContext|array $user): array
     {
-        return $this->wrap(fn (): array => ['query' => $this->assistant()->explain($plan, $this->user($user))]);
+        return $this->wrap(function () use ($plan, $user): array {
+            $context = $this->user($user);
+
+            return ['query' => $this->assistant($context)->explain($plan, $context)];
+        });
     }
 
     /**
@@ -651,6 +657,60 @@ final class AssistantApi
             $context = $user === null ? null : $this->user($user);
 
             return ['hits' => $this->knowledge()->retrieve($tenantId, $query, $k, $context)];
+        });
+    }
+
+    // ─── relations ────────────────────────────────────────────────────────────
+
+    /**
+     * What the package knows about key columns: "staff_id" points at
+     * "staff_member", the name comes from "staff_member.user_fname", and how
+     * sure it is.
+     *
+     * @param array<string,mixed> $filter status, source_table, limit
+     */
+    public function listRelations(int $tenantId, array $filter = []): array
+    {
+        return $this->wrap(fn (): array => ['items' => $this->relations()->list($tenantId, $filter)]);
+    }
+
+    /**
+     * Look through the catalog for key columns and propose relations.
+     *
+     * @param array<string,mixed> $opts tables, sample, auto_verify
+     */
+    public function discoverRelations(int $tenantId, array $opts = []): array
+    {
+        return $this->wrap(function () use ($tenantId, $opts): array {
+            $result = $this->relations()->discover($tenantId, $opts);
+
+            return ['discovery' => $result];
+        });
+    }
+
+    /** Accept a proposed relation; it joins the semantic layer from now on. */
+    public function approveRelation(int $tenantId, int $id): array
+    {
+        return $this->wrap(function () use ($tenantId, $id): array {
+            $relation = $this->relations()->approve($tenantId, $id);
+            if ($relation === null) {
+                return ['ok' => false, 'code' => 'not_found', 'error' => 'No such relation for this company.'];
+            }
+
+            return ['relation' => $relation];
+        });
+    }
+
+    /** Refuse a relation. It never comes back, not even on the next scan. */
+    public function rejectRelation(int $tenantId, int $id): array
+    {
+        return $this->wrap(function () use ($tenantId, $id): array {
+            $relation = $this->relations()->reject($tenantId, $id);
+            if ($relation === null) {
+                return ['ok' => false, 'code' => 'not_found', 'error' => 'No such relation for this company.'];
+            }
+
+            return ['relation' => $relation];
         });
     }
 
@@ -1413,6 +1473,19 @@ final class AssistantApi
             ?? new KnowledgeService($this->pdo, $this->llmOrNull(), (array) ($this->options['knowledge'] ?? [])));
     }
 
+    /** What a key column stands for: the relations the semantic layer may use. */
+    private function relations(): RelationService
+    {
+        /** @var RelationService */
+        return $this->made('relations', fn () => $this->given('relations', RelationService::class)
+            ?? new RelationService(
+                $this->pdo,
+                $this->schema(),
+                $this->policy(),
+                (array) ($this->options['relations'] ?? []),
+            ));
+    }
+
     private function documents(): DocumentService
     {
         /** @var DocumentService */
@@ -1631,7 +1704,7 @@ final class AssistantApi
             return $injected;
         }
 
-        $semantic = $this->semantic();
+        $semantic = $this->semantic((int) ($user?->tenantId ?? 0));
         $features = array_map('strval', Config::list('features'));
         $hooks = [];
         $runner = $this->runner();
@@ -1682,11 +1755,15 @@ final class AssistantApi
      * catalog already knows. A catalog nobody has synced is not an error: the
      * assistant answers from knowledge and documents and says so.
      *
+     * `$tenantId` decides which approved relations apply: the deployment-wide
+     * ones plus the company's own.
+     *
      * @return array{pack:DomainPack,compiler:?QueryCompiler,catalog:array<string,mixed>,columns:array<string,string[]>}
      */
-    private function semantic(): array
+    private function semantic(?int $tenantId = null): array
     {
-        return $this->made('semantic', function (): array {
+        $tenant = max(0, (int) $tenantId);
+        return $this->made('semantic' . ($tenant > 0 ? '.' . $tenant : ''), function () use ($tenant): array {
             $options = (array) ($this->options['semantic'] ?? []);
             $catalog = $options['catalog'] ?? null;
             if (!is_array($catalog)) {
@@ -1709,7 +1786,14 @@ final class AssistantApi
                 }
                 $columns[self::text($table)] = $names;
             }
-            $pack = DomainPack::load(null, array_merge($options, ['catalog' => $catalog]));
+            // A key column that nobody described still becomes a name, as long as
+            // a verified relation says what it points at.
+            $relations = $this->approvedRelations($tenant);
+            $pack = DomainPack::load(null, array_merge($options, [
+                'catalog' => $catalog,
+                'relations' => $relations,
+                'allowed_tables' => $this->policy()->allowedTables(),
+            ]));
             $compiler = $this->given('compiler', QueryCompiler::class);
             if ($compiler === null && $pack->hasDatasets()) {
                 $compiler = new QueryCompiler($pack, $this->policy(), $columns, (array) ($options['compiler'] ?? []));
@@ -1717,6 +1801,21 @@ final class AssistantApi
 
             return ['pack' => $pack, 'compiler' => $compiler, 'catalog' => $catalog, 'columns' => $columns];
         });
+    }
+
+    /**
+     * The relations the semantic layer may use for this company: verified ones
+     * whose target table the host's policy allows.
+     *
+     * @return array<int,array<string,mixed>>
+     */
+    private function approvedRelations(int $tenantId): array
+    {
+        try {
+            return $this->relations()->approved($tenantId);
+        } catch (Throwable) {
+            return [];
+        }
     }
 
     private function whatsappChannel(): ?ChannelInterface
@@ -1996,6 +2095,10 @@ final class AssistantApi
             'schema.import-dump' => fn (): array => $this->importSqlDump($input['file'] ?? '', (array) ($input['options'] ?? [])),
             'schema.import-csv' => fn (): array => $this->importSchemaDescriptions(self::asText($input['file'] ?? ''), (array) ($input['options'] ?? [])),
             'schema.train' => fn (): array => $this->train($tenant(), (array) ($input['options'] ?? [])),
+            'relation.list' => fn (): array => $this->listRelations($tenant(), (array) ($input['filter'] ?? [])),
+            'relation.discover' => fn (): array => $this->discoverRelations($tenant(), (array) ($input['options'] ?? [])),
+            'relation.approve' => fn (): array => $this->approveRelation($tenant(), (int) ($input['id'] ?? 0)),
+            'relation.reject' => fn (): array => $this->rejectRelation($tenant(), (int) ($input['id'] ?? 0)),
             'report.list' => fn (): array => $this->listReports($tenant(), isset($input['folder']) ? (string) $input['folder'] : null, $user),
             'report.run' => fn (): array => $this->runReport((string) ($input['id'] ?? ''), (array) ($input['params'] ?? []), $user),
             'schedule.create' => fn (): array => $this->createSchedule((array) $input),
