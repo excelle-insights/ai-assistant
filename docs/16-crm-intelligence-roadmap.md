@@ -28,6 +28,7 @@ real; nothing here is aspirational fiction.
 | Table/column policy, masking, row scope | `src/Support/SchemaPolicy.php`, `Contracts/PermissionResolverInterface.php` | the host owns permissions; the package cannot widen them |
 | Knowledge base with retrieval | `src/Services/KnowledgeService.php`, `Contracts/KnowledgeRetrieverInterface.php` | vectors + lexical scoring, tenant scoped, citations |
 | Reference values and metric summaries mined from live data | `SchemaService::extractReferenceValues()`, `extractMetrics()`, `searchReference()` | the assistant learns what a table actually contains |
+| CSV templates and bulk import | `SchemaService::schemaTemplate()` + `importDescriptions()`, `KnowledgeService::csvTemplate()` + `importCsv()`; API `schema.csv-template`, `knowledge.csv-template`, `knowledge.import`, `schema.import-csv`, `schema.import-dump` | a **schema description sheet** and a **knowledge document sheet** exist today; a **modules and operations sheet** does not (P4) |
 | Audit, exports, actions with confirmation, reports, schedules, channels | `AuditService`, `ExportService`, `ActionService`, `ReportService`, `SchedulesService`, `Channels/*` | all present and tested |
 
 ### Missing — the honest gaps
@@ -145,6 +146,23 @@ its tables look like.
 - `src/Services/CodeIndexService.php` — scans the host roots the host allows
   (`code.scan_paths`), PHP files only, with a size and file-count ceiling.
 
+**Where the scan starts.** The navigation map is the module index: a CRM's
+sidebar or menu already lists its modules and points at the page that handles
+each one. So the scan starts there, not in a blind directory walk.
+
+1. Read the menu/sidebar definition and the route table behind it (AMS:
+   `admin/menu/sidebar_menu.php` and the pages it points to).
+2. Each menu entry becomes a **module** with its label, its page and the files
+   that page includes.
+3. Follow each page into its forms, list views, reports and AJAX handlers.
+4. Extract the SQL from those files. That is where the real queries live —
+   a sidebar entry that leads to the reports page leads to the reports' SQL.
+5. Only then, and only if the navigation map is missing or thin, fall back to a
+   bounded directory sweep for report files and query files.
+
+This ordering matters: it reaches the *useful* part of the CRM first (the pages
+a user actually operates) and leaves framework and vendor code alone.
+
 What the scanner extracts:
 
 - SQL statements: string literals passed to `query()`, `prepare()`, `exec()`,
@@ -163,8 +181,23 @@ What happens to it:
 - **Extracted SQL is never executed.** It is text the model reads. The pack
   stays the authority on what may run.
 
+**The scan is remembered, not repeated.** A scan is expensive and the CRM's
+code changes slowly, so the index is persistent and incremental:
+
+- Every scanned file gets a **content fingerprint** (path + size + mtime +
+  hash) stored next to the index.
+- A re-scan reads only files whose fingerprint changed; unchanged files are
+  never re-parsed and their index entries are never re-embedded.
+- Deleted files lose their entries instead of leaving orphans.
+- The knowledge base deduplicates by content hash (`KnowledgeService::hash()`),
+  so a repeated scan cannot double the same statement.
+- The scan result is therefore **reused on the next run**: the assistant starts
+  from what it learned last time and only absorbs what changed.
+
 *Acceptance:* a question that a CRM report already answers returns the same
-numbers as that report, and the answer cites the host file it learned from.
+numbers as that report, and the answer cites the host file it learned from. A
+second scan of an unchanged CRM ingests nothing new and finishes without
+touching the LLM.
 
 ---
 
@@ -207,6 +240,38 @@ rules somebody is accountable for.
 - A rule that contradicts the data (the example question returns nothing, or
   returns a number nobody recognises) is flagged for review.
 
+**The modules and operations sheet.** The scanner discovers modules; a human
+confirms them and fills in what the code cannot say. That confirmation is a
+spreadsheet, not a form-by-form exercise: one row per module, and one row per
+operation inside it.
+
+Template (CSV), downloadable from the admin page and importable through the
+existing import path:
+
+| column | meaning |
+|---|---|
+| `module` | the module name as the sidebar shows it |
+| `purpose` | what the module is for, in one or two business sentences |
+| `operations` | the actions it supports (create, edit, approve, export, …) |
+| `tables` | the tables the module owns |
+| `key_fields` | the fields a person actually reads from it |
+| `business_rules` | the rules that decide what a row means |
+| `permissions` | who may see or act on it |
+| `owner` | the person accountable |
+| `source_file` | the file the facts came from |
+| `status` | `draft` / `verified` |
+
+Rules of the sheet:
+
+- One row per module **or** per operation, never a mixture, so it can be
+  filtered and sorted.
+- The `business_rules` cell holds plain sentences. The assistant reads it as
+  knowledge, never as SQL.
+- Import is idempotent: re-importing the sheet updates the rules it owns and
+  leaves everything else alone.
+- The sheet is optional. A CRM whose modules are clear from the navigation map
+  needs only verification, not authorship.
+
 *Acceptance:* every money rule on AMS — PAID vs NOTPAID, `currency_change` as an
 FX adjustment rather than income, deposit vs balance, `hs_state` codes — is a
 verified rule with a source link.
@@ -225,7 +290,9 @@ The flow:
 
 1. **Read the database.** `INFORMATION_SCHEMA` → catalog (tables, columns,
    types, keys, comments). Nothing is written to the CRM.
-2. **Read the code.** P2's scanner over the host's own roots.
+2. **Read the code.** P2's scanner over the host's own roots, starting from the
+   navigation map and using the file fingerprints to skip what it has already
+   read.
 3. **Propose a semantic layer.** Every table becomes a dataset; money columns
    become metrics; date columns become the date field; relations from P1 become
    joins and display columns; the descriptions found in code comments and
@@ -237,6 +304,13 @@ The flow:
 5. **Self-test.** The engine runs a canonical question set (P6) against the
    drafted pack and shows the admin each answer with its SQL. The admin fixes
    what is wrong; each fix becomes a correction the next scan keeps.
+
+**Everything the run learns is kept.** The catalog, the code index and the
+knowledge entries live in the package's own tables; the drafted semantic layer
+lives in the two JSON files. A second run of `discover.run` on the same CRM
+reads that stored state, re-derives only what changed and leaves the rest
+alone — so onboarding a CRM is a one-off, and the CRM stays described as it
+changes.
 
 *Acceptance:* a new CRM goes from "installed" to "answers the canonical set
 correctly" in one admin session, with no PHP written by hand.
@@ -297,7 +371,32 @@ Not "the model is clever" — measurable per CRM:
 
 ---
 
-## 6. Decisions to make
+## 6. What the administrator actually does
+
+The question behind most of the roadmap is: *who types what?* The answer is
+that typing is the fallback, not the method.
+
+| Step | Who does it | What it produces |
+|---|---|---|
+| Connect the database | once | the catalog — tables, columns, types, keys |
+| Let the scan run | once | the module map, the proven queries, the drafted pack |
+| Verify the modules | once per module | the module list is right, the operations are named |
+| Verify the rules | once per rule | a rule is marked `verified`, with an owner |
+| Fill the modules sheet | only for rules the code cannot show | business rules that live in someone's head |
+| Import the sheet | whenever it changes | updated rules, idempotently |
+| Nothing | every day after that | the assistant answers from what it stored |
+
+Two rules of thumb:
+
+- **Nothing is re-uploaded.** The scan, the catalog, the knowledge base and the
+  drafted packs are all stored. A later run reads what it already has and
+  absorbs only what changed.
+- **A human confirms, never authors, what the code can show.** The assistant
+  drafts the module list; the administrator says yes or corrects it.
+
+---
+
+## 7. Decisions to make
 
 1. **Sequence.** P1 + P2 + P3 deepen the AMS-quality bar; P5 makes the package
    sellable to other CRMs. Which first?
@@ -313,7 +412,7 @@ Not "the model is clever" — measurable per CRM:
 
 ---
 
-## 7. Related documents
+## 8. Related documents
 
 - [04 — Schema training](04-schema-training.md) — descriptions, aliases, dumps
 - [06 — Data, analysis & charts](06-data-and-charts.md) — the semantic layer and the query guardrails
