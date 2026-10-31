@@ -665,6 +665,7 @@ final class AssistantService
             return $plan;
         }
         $dataset = (string) $plan['dataset'];
+        $entry = $this->pack->dataset($dataset);
         $moved = [];
         $keep = [];
         foreach ($metrics as $raw) {
@@ -673,6 +674,18 @@ final class AssistantService
             if ($dimension !== null && $this->pack->metric($dataset, $name) === null) {
                 $moved[] = (string) $dimension['name'];
                 continue;
+            }
+            $metric = $this->pack->metric($dataset, $name);
+            if ($metric !== null && (string) ($metric['format'] ?? '') === 'money') {
+                // A sum on a record list answers a different question ("how
+                // much in total") than the one asked ("show every payment").
+                // The dataset's own money column shows the amount per record.
+                foreach ((array) ($entry['dimensions'] ?? []) as $candidate) {
+                    if (is_array($candidate) && (string) ($candidate['format'] ?? '') === 'money') {
+                        $moved[] = (string) $candidate['name'];
+                        continue 2;
+                    }
+                }
             }
             $keep[] = $name;
         }
