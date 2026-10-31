@@ -754,6 +754,29 @@ final class AssistantService
             }
             $chosen[] = (string) $name;
         }
+        // "Show all payments collected" asks for money without naming the
+        // column; a payment list without the amount is not an answer.
+        if (preg_match('/\b(amount|money|paid|collected|revenue|price|fee|cost|balance|value|spend|ksh|shillings?)\b/i', $question) === 1) {
+            $money = [];
+            foreach ((array) ($dataset['dimensions'] ?? []) as $dimension) {
+                if (!is_array($dimension)) {
+                    continue;
+                }
+                $name = (string) ($dimension['name'] ?? '');
+                if ($name === '' || in_array($name, $chosen, true)) {
+                    continue;
+                }
+                if ((string) ($dimension['format'] ?? '') === 'money') {
+                    $money[] = $name;
+                }
+            }
+            foreach (array_slice($money, 0, 2) as $name) {
+                if (count($chosen) >= 10) {
+                    break;
+                }
+                $chosen[] = (string) $name;
+            }
+        }
         if ($chosen !== []) {
             $plan['dimensions'] = array_values(array_unique($chosen));
         }
