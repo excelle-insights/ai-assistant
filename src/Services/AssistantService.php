@@ -807,6 +807,13 @@ final class AssistantService
                 '- Anything countable is intent "data": a number must come from a query, never from memory.',
                 '- A dataset name on its own is still "data" — "all listings", "show projects", "users", "tasks" must return rows, not help text.',
                 '- "All users", "all leads" and "list clients" ask for records: use the identity dimension (name, or title/unit when the dataset has one) and no measure, so each record is identified. Group by categories only when the question says "by ..." or asks how many.',
+                // A paged result is not a total: the model otherwise reads the 20
+                // rows it was shown and reports them as the count.
+                '- "How many" and "how much" ask for a number, so put the count or sum metric in metrics. Never answer one with a detail list: the rows returned are capped, and twenty rows on a page does not mean twenty in the CRM.',
+                '- When one question asks for two numbers ("how many leads, and how many became bookings"), choose the dataset that holds both measures and list both in metrics.',
+                // "Average per receipt" is one number about receipts, not a
+                // grouping by receipt — grouping there turns one figure into a page.
+                '- A question that asks for one figure ("how much in total", "how many", "the average", "the largest", "the smallest") goes in metrics with an EMPTY dimensions list. Do not add the record name, id or amount columns to identify it: that groups the aggregate into one row per record and the number is lost. Only group when the question says "by X" or "per X" where X is a different thing than the record being measured.',
                 '- A word in also[...] or a dataset label is the same dataset (for example "projects" or "properties" for listings). Resolve it to the dataset name.',
                 '- date[field] in the vocabulary marks the dataset\'s own date column. Use it only through date_range; never put that field in dimensions, filters, metrics or order_by.',
                 '- periods[month|year] (or a dimension named month, year, quarter, week or day) are that same date broken into parts. A question about a period ("payment totals by month", "leads per quarter") groups by that name AND adds the metric for the amount, so every period is one summed row — never one row per record.',
@@ -1606,6 +1613,24 @@ final class AssistantService
     }
 
     /**
+     * A question that wants one number, not a page of records. The words that
+     * name a record ("per receipt", "each client") are what the measure is
+     * computed over, not a request to group by them.
+     *
+     * @param array<string,mixed> $plan
+     */
+    private function asksForOneFigure(string $question, array $plan): bool
+    {
+        if ((array) ($plan['metrics'] ?? []) === []) {
+            return false;
+        }
+        if (preg_match('/\b(show|list|detail|which|who|whose|top|worst|names?|breakdown)\b/i', $question) === 1) {
+            return false;
+        }
+        return preg_match('/\b(how much|how many|total|average|avg|mean|largest|biggest|highest|smallest|lowest|minimum|maximum|overall)\b/i', $question) === 1;
+    }
+
+    /**
      * "List payments with receipt, project, amount and date" tends to come
      * back as a title-only list because the model drops the measure and the
      * date. Every pack field the question names is added to a record list, so
@@ -1633,6 +1658,17 @@ final class AssistantService
         // The fields the question names that this table does not have: the
         // answer says where they live instead of quietly dropping them.
         $missing = $this->missingFieldsFor($dataset, $words);
+        if ($this->asksForOneFigure($question, $plan)) {
+            // Keep the honest "this table has no column for X" note, but add no
+            // field: a figure stays one row.
+            if ($missing !== []) {
+                $plan['missing_fields'] = array_values(array_unique(array_merge(
+                    array_map('strval', (array) ($plan['missing_fields'] ?? [])),
+                    $missing
+                )));
+            }
+            return $plan;
+        }
         $named = [];
         foreach ((array) ($dataset['dimensions'] ?? []) as $dimension) {
             if (!is_array($dimension)) {
