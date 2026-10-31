@@ -202,7 +202,10 @@ final class DomainPack
             return null;
         }
         $wanted = self::key($name);
-        foreach ((array) $entry['dimensions'] as $dimension) {
+        foreach (array_merge((array) $entry['dimensions'], (array) ($entry['periods'] ?? [])) as $dimension) {
+            if (!is_array($dimension)) {
+                continue;
+            }
             if (self::key((string) $dimension['name']) === $wanted || self::key((string) ($dimension['label'] ?? '')) === $wanted) {
                 return $dimension;
             }
@@ -232,7 +235,13 @@ final class DomainPack
         if ($entry === null) {
             return [];
         }
-        return array_values(array_map(static fn (array $d): string => (string) $d['name'], (array) ($entry['dimensions'] ?? [])));
+        $names = array_map(static fn (array $d): string => (string) $d['name'], (array) ($entry['dimensions'] ?? []));
+        foreach ((array) ($entry['periods'] ?? []) as $period) {
+            if (is_array($period)) {
+                $names[] = (string) ($period['name'] ?? '');
+            }
+        }
+        return array_values(array_filter($names));
     }
 
     /** True when a dimension holds a raw key ("user_id") instead of a value a person reads. */
@@ -396,6 +405,17 @@ final class DomainPack
         if ($dimensions !== []) {
             $line .= ' dimensions[' . implode(', ', $dimensions) . ']';
         }
+        $periods = [];
+        foreach ((array) ($dataset['periods'] ?? []) as $period) {
+            if (is_array($period)) {
+                $periods[] = (string) ($period['name'] ?? '');
+            }
+        }
+        if ($periods !== []) {
+            // The dataset's own date, broken into parts. A question about a
+            // period groups by these, never by the raw date column.
+            $line .= ' periods[' . implode('|', $periods) . ']';
+        }
         if ((string) $dataset['date_field'] !== '') {
             $line .= ' date[' . (string) $dataset['date_field'] . ']';
         }
@@ -530,6 +550,65 @@ final class DomainPack
     }
 
     /**
+     * The periods a dataset's own date can be broken into.
+     *
+     * "Payment totals by month" is a question about time, not about a column:
+     * every dataset that keeps a date gets year, quarter, month, week and day
+     * for free, so the answer can group by a period instead of listing rows.
+     *
+     * A column that stores text dates ("25-08-2026") is read with the format
+     * the dataset knows, because MySQL cannot read it any other way.
+     *
+     * @param array<string,mixed> $dataset
+     * @return array<int,array<string,mixed>>
+     */
+    private function periodsFor(array $dataset): array
+    {
+        $field = trim((string) ($dataset['date_field'] ?? ''));
+        if ($field === '') {
+            return [];
+        }
+        $table = trim((string) ($dataset['table'] ?? ''));
+        $format = trim((string) ($dataset['date_format'] ?? ''));
+        $column = $table === '' ? $field : '`' . $table . '`.`' . $field . '`';
+        $base = $format === '' ? $column : "STR_TO_DATE(" . $column . ", '" . str_replace("'", "''", $format) . "')";
+
+        $shapes = [
+            'year' => ['Year', 'DATE_FORMAT(' . $base . ", '%Y')", ['year', 'yr', 'annually', 'the year']],
+            'quarter' => ['Quarter', "CONCAT(DATE_FORMAT(" . $base . ", '%Y'), '-Q', QUARTER(" . $base . '))', ['quarter', 'quarterly', 'the quarter']],
+            'month' => ['Month', "DATE_FORMAT(" . $base . ", '%Y-%m')", ['month', 'monthly', 'the month']],
+            'week' => ['Week', "DATE_FORMAT(" . $base . ", '%x-W%v')", ['week', 'weekly', 'the week']],
+            'day' => ['Day', "DATE_FORMAT(" . $base . ", '%Y-%m-%d')", ['day', 'daily', 'the day']],
+        ];
+
+        $existing = [];
+        foreach ((array) ($dataset['dimensions'] ?? []) as $dimension) {
+            if (is_array($dimension)) {
+                $existing[] = self::key((string) ($dimension['name'] ?? ''));
+            }
+        }
+
+        $periods = [];
+        foreach ($shapes as $name => [$label, $expr, $aliases]) {
+            if (in_array(self::key($name), $existing, true)) {
+                // A pack that declares its own month keeps its own month.
+                continue;
+            }
+            $periods[] = [
+                'name' => $name,
+                'label' => $label,
+                'column' => $field,
+                'expr' => $expr,
+                'format' => 'text',
+                'aliases' => $aliases,
+                'description' => 'The ' . strtolower($label) . ' of ' . $field . '.',
+            ];
+        }
+
+        return $periods;
+    }
+
+    /**
      * One catalog table becomes one dataset: measures sum, descriptive columns
      * slice, the first date column windows the question.
      */
@@ -551,6 +630,7 @@ final class DomainPack
             $metrics = [['name' => 'records', 'label' => 'Records', 'function' => 'count', 'column' => '*', 'format' => 'number', 'aliases' => ['count', 'total count']]];
             $dimensions = [];
             $dateField = '';
+            $dateFormat = '';
             foreach ($columns as $column) {
                 $name = (string) ($column['name'] ?? '');
                 // Secrets never enter the vocabulary; PII stays usable because the
@@ -561,6 +641,7 @@ final class DomainPack
                 $format = (string) ($column['format'] ?? SchemaHints::format($name, (string) ($column['type'] ?? '')));
                 if ($dateField === '' && in_array($format, ['date', 'datetime'], true)) {
                     $dateField = $name;
+                    $dateFormat = (string) ($column['date_format'] ?? '');
                 }
                 if (!empty($column['is_measure'])) {
                     if (count($metrics) < $this->maxMetrics) {
@@ -594,12 +675,13 @@ final class DomainPack
                     foreach ($columns as $column) {
                         if (strcasecmp((string) ($column['name'] ?? ''), $candidate) === 0) {
                             $dateField = $candidate;
+                            $dateFormat = (string) ($column['date_format'] ?? '');
                             break 2;
                         }
                     }
                 }
             }
-            $this->datasets[self::key((string) $tableName)] = [
+            $dataset = [
                 'key' => self::key((string) $tableName),
                 'name' => (string) $tableName,
                 'pack' => 'auto',
@@ -607,6 +689,7 @@ final class DomainPack
                 'label' => (string) ($entry['label'] ?? SchemaHints::label((string) $tableName)),
                 'description' => (string) ($entry['description'] ?? ''),
                 'date_field' => $dateField,
+                'date_format' => $dateFormat,
                 'metrics' => $metrics,
                 'dimensions' => $dimensions,
                 'joins' => [],
@@ -615,6 +698,8 @@ final class DomainPack
                 'default_order' => '',
                 'source' => 'auto',
             ];
+            $dataset['periods'] = $this->periodsFor($dataset);
+            $this->datasets[self::key((string) $tableName)] = $dataset;
             $this->entities[self::key((string) $tableName)] = [
                 'key' => self::key((string) $tableName),
                 'name' => (string) $tableName,
@@ -824,7 +909,7 @@ final class DomainPack
             $metrics[] = ['name' => 'records', 'label' => 'Records', 'function' => 'count', 'column' => '*', 'format' => 'number', 'aliases' => ['records'], 'description' => ''];
         }
 
-        return [
+        $dataset = [
             'key' => self::key($name),
             'name' => $name,
             'pack' => $packName,
@@ -848,6 +933,9 @@ final class DomainPack
             'default_order' => trim((string) ($raw['default_order'] ?? '')),
             'source' => 'pack',
         ];
+        $dataset['periods'] = $this->periodsFor($dataset);
+
+        return $dataset;
     }
 
     /** @param array<string,mixed> $raw @return array<string,mixed>|null */
