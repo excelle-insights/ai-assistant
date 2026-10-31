@@ -633,6 +633,77 @@ $otherReport = (new AssistantService(
 ))->ask('what is the orders total?', new UserContext('u9', 9, 'web', 'thread-9', []));
 same('report: another company is not offered it', null, $otherReport->meta['report'] ?? null);
 
+// ─── a report screen this CRM already ships ───────────────────────────────────
+
+$screenPack = new DomainPack([[
+    'name' => 'x',
+    'datasets' => [[
+        'name' => 'orders', 'table' => 'orders', 'date_field' => 'created_at', 'tenant_scoped' => true,
+        'metrics' => [['name' => 'records', 'label' => 'Records', 'function' => 'count', 'column' => 'orders.id']],
+        'dimensions' => [
+            ['name' => 'name', 'label' => 'Order name', 'column' => 'orders.status'],
+            ['name' => 'total', 'label' => 'Order total', 'column' => 'orders.total_amount'],
+        ],
+    ]],
+    'reports' => [
+        [
+            'name' => 'collections', 'label' => 'Collections', 'dataset' => 'orders',
+            'question' => 'collections report', 'aliases' => ['collections report'],
+            'plan' => ['dataset' => 'orders', 'dimensions' => ['name', 'total'], 'limit' => 5],
+        ],
+        [
+            'name' => 'orders', 'label' => 'Orders', 'dataset' => 'orders',
+            'question' => 'orders report', 'aliases' => ['orders report'],
+            'plan' => ['dataset' => 'orders', 'dimensions' => ['name'], 'limit' => 7],
+        ],
+    ],
+]], [], ['auto_derive' => false]);
+$screenCompiler = new QueryCompiler($screenPack, new SchemaPolicy(), $tableColumns);
+
+$screenLlm = new ScriptedLlm(['intent' => 'report', 'plan' => []]);
+$screen = (new AssistantService(
+    llm: $screenLlm,
+    pack: $screenPack,
+    compiler: $screenCompiler,
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('collections report', $user);
+same('screen: the report screen is answered with data', 'data', $screen->intent);
+same('screen: the answer came from the screen, not the picker', 'pack_report', $screen->meta['routed_by'] ?? '');
+same('screen: the columns are the ones the screen shows', ['name', 'total'], array_map('strval', (array) ($screen->meta['plan']['dimensions'] ?? [])));
+same('screen: the row limit is the screen\'s', 5, (int) ($screen->meta['plan']['limit'] ?? 0));
+same('screen: the screen is the dataset behind it', 'orders', (string) ($screen->meta['plan']['dataset'] ?? ''));
+
+// The question only names the subject: the router's plan wins, because the
+// screen is not what was asked for.
+$plain = (new AssistantService(
+    llm: new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records']]]),
+    pack: $screenPack,
+    compiler: $screenCompiler,
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('how many orders do we have?', $user);
+same('screen: a question that only names the subject keeps the router\'s plan', 'router', $plain->meta['routed_by'] ?? '');
+same('screen: and it is answered as a count', 'Orders: 3.', $plain->text);
+
+// The question names the screen: the screen's shape wins.
+$named = (new AssistantService(
+    llm: new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records']]]),
+    pack: $screenPack,
+    compiler: $screenCompiler,
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('orders report', $user);
+same('screen: a named screen beats the router\'s plan', 'pack_report', $named->meta['routed_by'] ?? '');
+same('screen: and it shows the screen\'s columns', ['name'], array_map('strval', (array) ($named->meta['plan']['dimensions'] ?? [])));
+
+// A vague question is answered with a question, not with a guess.
+$vague = (new AssistantService(
+    llm: new ScriptedLlm(['intent' => 'help', 'plan' => []]),
+    pack: $screenPack,
+    compiler: $screenCompiler,
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('show me the report', $user);
+same('screen: a vague question asks which one', 'clarify', $vague->intent);
+check('screen: and it offers the screens this CRM has', ($vague->suggestions ?? []) !== [], json_encode($vague->suggestions ?? []));
+
 // ─── the business rules this CRM follows ──────────────────────────────────────
 
 $pdo->exec('CREATE TABLE `aiask_knowledge` (

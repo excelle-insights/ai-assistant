@@ -42,6 +42,8 @@ final class DomainPack
     private array $entities = [];
     /** @var array<string,array<string,mixed>> */
     private array $actions = [];
+    /** @var array<int,array<string,mixed>> the reports this CRM already has */
+    private array $reports = [];
     /** @var array<string,true> tables a pack dataset already answers for */
     private array $packTables = [];
     /** @var array<int,array<string,mixed>> */
@@ -128,6 +130,16 @@ final class DomainPack
     public function listDatasets(): array
     {
         return array_values($this->datasets);
+    }
+
+    /**
+     * The reports this CRM already has.
+     *
+     * @return array<int,array<string,mixed>>
+     */
+    public function reports(): array
+    {
+        return $this->reports;
     }
 
     /** @return array<int,string> dataset names, for capability panels and error text */
@@ -375,7 +387,16 @@ final class DomainPack
     {
         $metrics = [];
         foreach ((array) $dataset['metrics'] as $metric) {
-            $metrics[] = (string) $metric['name'];
+            $name = (string) ($metric['name'] ?? '');
+            $aliases = array_values(array_filter(
+                array_map('strval', (array) ($metric['aliases'] ?? [])),
+                static fn (string $alias): bool => $alias !== '' && self::key($alias) !== self::key($name)
+            ));
+            // A measure is often called something else in a question ("quiet
+            // days", "collections"); the alias is what lets the router find it.
+            $metrics[] = $aliases === []
+                ? $name
+                : $name . '(' . implode('|', array_slice($aliases, 0, 2)) . ')';
         }
         $dimensions = [];
         foreach ((array) $dataset['dimensions'] as $dimension) {
@@ -547,6 +568,49 @@ final class DomainPack
                 $this->actions[$action['key']] = $action;
             }
         }
+        foreach ((array) ($pack['reports'] ?? []) as $raw) {
+            if (!is_array($raw)) {
+                continue;
+            }
+            $report = $this->normaliseReport($raw);
+            if ($report !== null) {
+                $this->reports[] = $report;
+            }
+        }
+    }
+
+    /**
+     * A report the CRM already has.
+     *
+     * A CRM that ships twenty report screens wants the assistant to answer
+     * "the collections report" with the same numbers the screen shows. The
+     * pack names the screen, the question it answers and the dataset behind
+     * it; the assistant then routes to that dataset instead of guessing.
+     *
+     * @param array<string,mixed> $raw
+     * @return array<string,mixed>|null
+     */
+    private function normaliseReport(array $raw): ?array
+    {
+        $name = trim((string) ($raw['name'] ?? ''));
+        if ($name === '') {
+            return null;
+        }
+
+        return [
+            'name' => $name,
+            'label' => trim((string) ($raw['label'] ?? $name)),
+            'dataset' => trim((string) ($raw['dataset'] ?? '')),
+            'module' => trim((string) ($raw['module'] ?? '')),
+            'question' => trim((string) ($raw['question'] ?? '')),
+            'description' => trim((string) ($raw['description'] ?? '')),
+            'screen' => trim((string) ($raw['screen'] ?? '')),
+            'aliases' => array_values(array_map('strval', (array) ($raw['aliases'] ?? []))),
+            // The shape of the screen, when it has one: the dataset it reads
+            // and the columns it shows. A screen with a fixed shape is answered
+            // with that shape, not with a query rebuilt from the question.
+            'plan' => (array) ($raw['plan'] ?? []),
+        ];
     }
 
     /**
@@ -978,7 +1042,7 @@ final class DomainPack
             'column' => trim((string) ($raw['column'] ?? (isset($raw['expr']) && $raw['expr'] !== '' ? '' : $name))),
             'expr' => trim((string) ($raw['expr'] ?? '')),
             'format' => strtolower(trim((string) ($raw['format'] ?? 'text'))),
-            'via' => trim((string) ($raw['via'] ?? '')),
+            'via' => self::viaList($raw['via'] ?? ''),
             'aliases' => self::aliasList($raw['aliases'] ?? null, $name),
             'description' => trim((string) ($raw['description'] ?? '')),
         ];
@@ -1033,13 +1097,46 @@ final class DomainPack
         ];
     }
 
-    /** @param mixed $aliases @return string[] */
+    /**
+     * The words a field answers to, as they were written.
+     *
+     * The text is kept: a model's "quiet days" has to match the pack's
+     * "quiet_days", and a prompt that shows "quietdays" reads as gibberish.
+     * Lookups normalise both sides, so the wording stays free.
+     *
+     * @param mixed $aliases @return string[]
+     */
     private static function aliasList(mixed $aliases, string $fallback): array
     {
-        $out = [self::key($fallback)];
-        foreach ((array) $aliases as $alias) {
-            if (is_string($alias) && trim($alias) !== '') {
-                $out[] = self::key($alias);
+        $out = [];
+        $seen = [];
+        foreach (array_merge([$fallback], (array) $aliases) as $alias) {
+            if (!is_string($alias)) {
+                continue;
+            }
+            $clean = trim($alias);
+            $key = self::key($clean);
+            if ($key === '' || isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+            $out[] = $clean;
+        }
+        return $out;
+    }
+
+    /**
+     * The tables a field is reached through. A list is a chain: a client
+     * behind a payment record needs both joins, in order.
+     *
+     * @return string[]
+     */
+    private static function viaList(mixed $via): array
+    {
+        $out = [];
+        foreach ((array) $via as $item) {
+            if (is_string($item) && trim($item) !== '') {
+                $out[] = trim($item);
             }
         }
         return array_values(array_unique($out));
