@@ -108,7 +108,7 @@ final class QueryCompiler
      * Compile a plan.
      *
      * @param array{tenant_id?:int|null,tenant_column?:string,row_scope?:array<string,string>,hidden_columns?:array<string,array<int,string>>,limit?:int} $scope
-     * @return array{sql:string,bind:array<string,mixed>,tables:string[],columns:string[],limit:int,aggregate:bool,dataset:string,date_field:string,applied_filters:array<string,mixed>}
+     * @return array{sql:string,bind:array<string,mixed>,tables:string[],columns:string[],formats:array<string,string>,limit:int,aggregate:bool,dataset:string,date_field:string,applied_filters:array<string,mixed>}
      * @throws \InvalidArgumentException when the plan names something that does not exist
      */
     public function compile(QueryPlan $plan, array $scope = []): array
@@ -128,6 +128,7 @@ final class QueryCompiler
         $select = [];
         $groupBy = [];
         $columns = [];
+        $formats = [];
 
         if ($aggregate) {
             foreach ($plan->dimensions as $raw) {
@@ -137,6 +138,7 @@ final class QueryCompiler
                 $select[] = $expression . ' AS `' . $alias . '`';
                 $groupBy[] = $expression;
                 $columns[] = $alias;
+                $formats[$alias] = (string) ($dimension['format'] ?? '');
             }
         }
 
@@ -150,6 +152,7 @@ final class QueryCompiler
                 $select[] = self::aggregateSql((string) $metric['function'], $column) . ' AS `' . $alias . '`';
             }
             $columns[] = $alias;
+            $formats[$alias] = (string) ($metric['format'] ?? '');
         }
 
         // Detail question (no grouping): read the fields the plan names, or the
@@ -172,6 +175,7 @@ final class QueryCompiler
                 $alias = Db::identifier($this->alias((string) $dimension['name']));
                 $select[] = $this->dimensionSql($dimension, $table, $joins) . ' AS `' . $alias . '`';
                 $columns[] = $alias;
+                $formats[$alias] = (string) ($dimension['format'] ?? '');
             }
         }
 
@@ -215,6 +219,9 @@ final class QueryCompiler
             'bind' => $bind,
             'tables' => array_values(array_unique(array_merge([$table], array_column($joins, 'table')))),
             'columns' => array_values(array_unique($columns)),
+            // How the UI should render each selected column (money, percent,
+            // date…). Kept beside the SQL so hosts never guess from the name.
+            'formats' => $formats,
             'limit' => $limit,
             'aggregate' => $aggregate,
             'dataset' => $datasetName,
