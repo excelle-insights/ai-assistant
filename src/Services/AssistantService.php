@@ -68,6 +68,25 @@ final class AssistantService
     ];
 
     /**
+     * A question with its typos corrected.
+     *
+     * The correction is per word, not per substring: "includ" is a typo for
+     * "include", but it is also the first six letters of the word the user
+     * actually wrote, and repairing it there turns "include" into "includee".
+     *
+     * @param string $question
+     */
+    private static function corrected(string $question): string
+    {
+        $text = ' ' . strtolower(trim($question)) . ' ';
+        foreach (self::MISSPELLINGS as $wrong => $right) {
+            $text = (string) preg_replace('/\b' . preg_quote($wrong, '/') . '\b/', $right, $text);
+        }
+
+        return $text;
+    }
+
+    /**
      * Words that ask for "the report" without saying which one.
      *
      * A question built from one of these names no dataset of its own, so
@@ -291,11 +310,15 @@ final class AssistantService
         // "Include their contact details" names no dataset: it continues the
         // answer before it. Without this the router sends it to the knowledge
         // base and the thread loses its subject.
+        //
+        // The router is not asked to rebuild the query for a continuation. It
+        // re-reads the answer and copies what it sees — a filter whose value
+        // is the field's label — and the answer then finds nothing. The
+        // previous plan is the truth; the question only adds columns to it.
         $previous = $this->previousDataPlan($history);
-        if ($previous !== null && $this->continuesPreviousAnswer($request->question) && $intent !== 'data') {
-            return ['intent' => 'data', 'plan' => $this->asContinuation($previous), 'by' => 'follow_up'];
-        }
-        if ($intent === 'data' && $plan === [] && $previous !== null && $this->continuesPreviousAnswer($request->question)) {
+        if ($previous !== null
+            && !in_array($intent, ['action', 'document'], true)
+            && $this->continuesPreviousAnswer($request->question)) {
             return ['intent' => 'data', 'plan' => $this->asContinuation($previous), 'by' => 'follow_up'];
         }
         // A question that only names fields is a record list, not a request for
@@ -388,9 +411,8 @@ final class AssistantService
      */
     private function continuesPreviousAnswer(string $question): bool
     {
-        $text = ' ' . strtolower(trim($question)) . ' ';
         // "inlude contact info" is the same question as "include contact info".
-        $text = strtr($text, self::MISSPELLINGS);
+        $text = self::corrected($question);
         if (mb_strlen(trim($question)) > 120) {
             return false;
         }
@@ -591,7 +613,7 @@ final class AssistantService
     {
         $text = ' ' . trim((string) preg_replace('/[^a-z0-9_ ]+/u', ' ', strtolower($question)), ' ') . ' ';
 
-        return ' ' . trim(strtr($text, self::MISSPELLINGS)) . ' ';
+        return self::corrected($text);
     }
 
     /**
