@@ -180,6 +180,7 @@ check('sql: tenant filter injected', str_contains($compiled['sql'], '`orders`.`c
 same('sql: default limit applied', 20, $compiled['limit']);
 same('sql: dataset recorded', 'orders', $compiled['dataset']);
 same('sql: single metric column', ['revenue'], $compiled['columns']);
+same('sql: money format reported', ['revenue' => 'money'], $compiled['formats']);
 
 $grouped = $compiler->compile(QueryPlan::fromArray([
     'dataset' => 'orders',
@@ -189,6 +190,8 @@ $grouped = $compiler->compile(QueryPlan::fromArray([
 ]), $scoped);
 check('sql: group by the dimension', str_contains($grouped['sql'], 'GROUP BY `orders`.`status`'), $grouped['sql']);
 check('sql: dimension aliased', str_contains($grouped['sql'], '`orders`.`status` AS `status`'));
+same('sql: dimension format reported', 'text', $grouped['formats']['status'] ?? null);
+same('sql: metric format reported', 'money', $grouped['formats']['revenue'] ?? null);
 check('sql: count distinct', str_contains($grouped['sql'], 'COUNT(DISTINCT `orders`.`id`) AS `orders_count`'));
 check('sql: orders by the metric alias', str_contains($grouped['sql'], 'ORDER BY `revenue` DESC'), $grouped['sql']);
 

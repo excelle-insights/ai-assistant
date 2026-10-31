@@ -519,7 +519,13 @@ final class AssistantService
             suggestions: (array) ($export['suggestions'] ?? []),
             sql: $this->mayUseRawSql($user) ? (string) ($compiled['sql'] ?? '') : null,
             appliedFilters: (array) ($compiled['applied_filters'] ?? []),
-            meta: ['columns' => $result->columns, 'truncated' => $result->truncated, 'source' => $result->source, 'export' => $export]
+            meta: [
+                'columns' => $result->columns,
+                'formats' => (array) ($compiled['formats'] ?? []),
+                'truncated' => $result->truncated,
+                'source' => $result->source,
+                'export' => $export,
+            ]
         );
     }
 
