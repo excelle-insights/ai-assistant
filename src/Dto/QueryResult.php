@@ -49,8 +49,13 @@ final readonly class QueryResult
         return count($this->rows);
     }
 
-    /** Compact text form for the prompt: one line per row. */
-    public function asPromptText(int $maxRows = 60): string
+    /**
+     * Compact text form for the prompt: one line per row.
+     *
+     * @param array<string,string> $labels  column key => readable name
+     * @param array<string,string> $formats column key => money, number, percent…
+     */
+    public function asPromptText(int $maxRows = 60, array $labels = [], array $formats = []): string
     {
         if ($this->rows === []) {
             return '(no rows)';
@@ -66,7 +71,8 @@ final readonly class QueryResult
         foreach (array_slice($this->rows, 0, $maxRows) as $row) {
             $parts = [];
             foreach ($row as $key => $value) {
-                $parts[] = $key . '=' . self::scalar($value);
+                $name = (string) ($labels[$key] ?? $key);
+                $parts[] = $name . '=' . self::scalar($value, (string) ($formats[$key] ?? ''));
             }
             $lines[] = implode(' ', $parts);
         }
@@ -76,13 +82,21 @@ final readonly class QueryResult
         return implode("\n", $lines);
     }
 
-    private static function scalar(mixed $value): string
+    private static function scalar(mixed $value, string $format = ''): string
     {
         if ($value === null) {
             return '';
         }
         if (is_bool($value)) {
             return $value ? '1' : '0';
+        }
+        if (is_int($value) || is_float($value)) {
+            $kind = strtolower(trim($format));
+            if (in_array($kind, ['money', 'currency', 'number', 'count'], true)) {
+                $decimals = (in_array($kind, ['money', 'currency'], true) && floor((float) $value) !== (float) $value) ? 2 : 0;
+                return number_format((float) $value, $decimals);
+            }
+            return (string) $value;
         }
         if (is_scalar($value)) {
             return (string) $value;
