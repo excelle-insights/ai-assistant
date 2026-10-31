@@ -38,7 +38,7 @@ real; nothing here is aspirational fiction.
 | The host's **source code** is never read | business rules that only live in PHP (how "paid" is decided, how a balance is computed) are invisible to the assistant | P2 ✅ |
 | There is no **query library** | the assistant re-derives a calculation the CRM already has a proven report for | P3 ✅ |
 | A key column (`staff_id`) becomes a name only when a pack declares the sibling | on an uncurated CRM the answer says "12" instead of "Jane Wanjiru" | P1 ✅ |
-| There is no **onboarding flow** | installing into a new CRM still needs a human to write the pack | P5 |
+| There is no **onboarding flow** | installing into a new CRM still needs a human to write the pack | P5 ✅ |
 | Business rules are free-text knowledge, not **verified, owned rules** | a rule can be wrong and nobody is told | P4 ✅ |
 | No **regression benchmark** per CRM | a change that breaks three answers is only noticed by a user | P6 |
 
@@ -356,13 +356,18 @@ offered the rule.
 
 ---
 
-### P5 — Install-any-CRM onboarding engine
+### P5 — Install-any-CRM onboarding engine ✅ done
 
 *Goal:* the assistant prepares itself for a CRM it has never seen, then an
 administrator confirms the parts that matter.
 
-*New file:* `src/Services/DiscoveryService.php`, exposing an admin action
-`discover.run` in the API.
+*What shipped:*
+
+- `src/Services/DiscoveryService.php` — `run()`, `draftPack()`,
+  `draftKnowledge()`, `writeFiles()`, `importKnowledgeFile()`, `selfTest()`.
+- API: `discover.run`, `discover.draft`, `discover.knowledge-import`;
+  `service('discovery')`.
+- Settings `discovery.output_dir` and `discovery.questions`.
 
 The flow:
 
@@ -390,8 +395,27 @@ reads that stored state, re-derives only what changed and leaves the rest
 alone — so onboarding a CRM is a one-off, and the CRM stays described as it
 changes.
 
-*Acceptance:* a new CRM goes from "installed" to "answers the canonical set
-correctly" in one admin session, with no PHP written by hand.
+**A failed step is recorded, not fatal.** Each of the six steps is wrapped, so a
+schema that cannot be synced on one database does not cost the admin the rest of
+the install; the failure is returned in `errors` with the step that failed.
+
+**The rules that come from code are drafts.** The code says what it does, but
+only a person can say whether that is the business rule, so a drafted rule
+arrives without an owner and waits in the rules screen.
+
+*The two files are the contract with the host.* The pack file is read back by
+`semantic.pack_file` like any other pack, and the knowledge file is loaded
+through the normal import path — importing it twice changes nothing.
+
+*Acceptance:* `tests/discovery.php` — 67 checks: one dataset per table, the
+money column became a summed metric, the date column became the date field, the
+verified relation became a join and a `customer_name` dimension, the module and
+the rule and the glossary were drafted, the rule is a draft, the two files were
+written and the pack file was read back through `DomainPack::configuredPacks()`,
+the knowledge file imported and re-imported without changing anything, the
+self-test answered every dataset with real SQL scoped to the tenant and the
+right rows, an unrelated question is not answered by guessing, and the API
+exposes the draft and the import.
 
 ---
 

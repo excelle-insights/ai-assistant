@@ -752,6 +752,17 @@ final class ConfigCatalog
             'label' => 'How well a question must match a business rule',
             'help' => 'Below this score a rule is not put in front of the router.',
         ],
+        'discovery.output_dir' => [
+            'column' => 'operations_json', 'type' => 'string', 'default' => '',
+            'label' => 'Where the install writes its files',
+            'help' => 'The folder ai-assistant.packs.json and ai-assistant.knowledge.json are written to. '
+                . 'Empty = nothing is written; the draft is still returned.',
+        ],
+        'discovery.questions' => [
+            'column' => 'operations_json', 'type' => 'list', 'default' => [],
+            'label' => 'Canonical questions',
+            'help' => 'The questions the install proves itself against. Empty = one per dataset.',
+        ],
     ];
 
     public static function has(string $path): bool

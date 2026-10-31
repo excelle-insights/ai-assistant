@@ -29,6 +29,7 @@ use ExcelleInsights\AiAssistant\Services\ChartService;
 use ExcelleInsights\AiAssistant\Services\CodeIndexService;
 use ExcelleInsights\AiAssistant\Services\ConfigService;
 use ExcelleInsights\AiAssistant\Services\ConversationStore;
+use ExcelleInsights\AiAssistant\Services\DiscoveryService;
 use ExcelleInsights\AiAssistant\Services\DocumentService;
 use ExcelleInsights\AiAssistant\Services\ExportService;
 use ExcelleInsights\AiAssistant\Services\FeedbackService;
@@ -150,6 +151,7 @@ final class AssistantApi
             'code' => $this->code(),
             'queries' => $this->queries(),
             'rules' => $this->rules(),
+            'discovery' => $this->discovery(),
             'documents' => $this->documents(),
             'export' => $this->exports(),
             'actions' => $this->actions(),
@@ -166,7 +168,7 @@ final class AssistantApi
             'assistant' => $this->assistant(),
             default => throw new InvalidArgumentException(
                 'Unknown service "' . $name . '". Known: llm, policy, schema, knowledge, relations, code, queries, '
-                . 'rules, documents, export, actions, outbox, reports, schedules, feedback, usage, settings, '
+                . 'rules, discovery, documents, export, actions, outbox, reports, schedules, feedback, usage, settings, '
                 . 'configuration, audit, charts, conversations, assistant.'
             ),
         };
@@ -963,6 +965,41 @@ final class AssistantApi
     public function importRuleSheet(int $tenantId, string $csv, ?string $updatedBy = null): array
     {
         return $this->wrap(fn (): array => $this->rules()->importSheet($tenantId, $csv, $updatedBy));
+    }
+
+    // ─── the install ──────────────────────────────────────────────────────────
+
+    /**
+     * Read the CRM, draft its vocabulary, write it down and prove it works.
+     *
+     * @param array<string,mixed> $opts prune, code, relations, questions, files
+     */
+    public function discover(int $tenantId, array $opts = []): array
+    {
+        return $this->wrap(fn (): array => ['discovery' => $this->discovery()->run($tenantId, $opts)]);
+    }
+
+    /**
+     * The drafted semantic layer and knowledge, without writing or running
+     * anything — what an admin sees before committing to it.
+     */
+    public function discoverDraft(int $tenantId): array
+    {
+        return $this->wrap(fn (): array => [
+            'pack' => $this->discovery()->draftPack($tenantId),
+            'knowledge' => $this->discovery()->draftKnowledge($tenantId),
+        ]);
+    }
+
+    /**
+     * Load a committed knowledge file into the base.
+     *
+     * The pack file is read by the semantic layer on its own; the knowledge
+     * file is loaded here, once, and then behaves like any other fact.
+     */
+    public function importDiscoveryKnowledge(int $tenantId, string $path, ?string $updatedBy = null): array
+    {
+        return $this->wrap(fn (): array => $this->discovery()->importKnowledgeFile($tenantId, $path, $updatedBy));
     }
 
     // ─── schema learning ──────────────────────────────────────────────────────
@@ -1766,6 +1803,22 @@ final class AssistantApi
             ?? new RuleService($this->knowledge(), (array) ($this->options['rules'] ?? [])));
     }
 
+    /** The install: read the CRM, draft its vocabulary, write it down. */
+    private function discovery(): DiscoveryService
+    {
+        /** @var DiscoveryService */
+        return $this->made('discovery', fn () => $this->given('discovery', DiscoveryService::class)
+            ?? new DiscoveryService(
+                $this->pdo,
+                $this->schema(),
+                $this->relations(),
+                $this->code(),
+                $this->knowledge(),
+                $this->policy(),
+                (array) ($this->options['discovery'] ?? []),
+            ));
+    }
+
     private function documents(): DocumentService
     {
         /** @var DocumentService */
@@ -2410,6 +2463,13 @@ final class AssistantApi
             'rule.sheet-import' => fn (): array => $this->importRuleSheet(
                 $tenant(),
                 self::asText($input['file'] ?? ''),
+                isset($input['updated_by']) ? (string) $input['updated_by'] : $user?->userId
+            ),
+            'discover.run' => fn (): array => $this->discover($tenant(), (array) ($input['options'] ?? [])),
+            'discover.draft' => fn (): array => $this->discoverDraft($tenant()),
+            'discover.knowledge-import' => fn (): array => $this->importDiscoveryKnowledge(
+                $tenant(),
+                (string) ($input['path'] ?? $input['file'] ?? ''),
                 isset($input['updated_by']) ? (string) $input['updated_by'] : $user?->userId
             ),
             'report.list' => fn (): array => $this->listReports($tenant(), isset($input['folder']) ? (string) $input['folder'] : null, $user),
