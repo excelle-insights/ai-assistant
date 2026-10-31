@@ -544,6 +544,44 @@ same('follow-up: the period of the first answer is kept', 1, count($more->rows))
 same('follow-up: the plan of the answer is kept', 'leads', (string) ($more->meta['plan']['dataset'] ?? ''));
 check('follow-up: the plan is marked as a continuation', (bool) ($more->meta['plan']['continued'] ?? false), json_encode($more->meta['plan'] ?? []));
 
+// ─── a follow-up keeps the answer it continues ───────────────────────────────
+// The router re-reads the answer before it and copies what it sees: a filter
+// whose value is the field's label. The continuation keeps the plan of the
+// answer it continues, so the rows are still there.
+$rebuilt = new SequencedLlm([
+    ['intent' => 'data', 'plan' => [
+        'dataset' => 'leads', 'dimensions' => ['name', 'state'],
+        'filters' => [['field' => 'state', 'operator' => '=', 'value' => 'potential']],
+    ]],
+    ['intent' => 'data', 'plan' => [
+        'dataset' => 'leads', 'dimensions' => ['name', 'phone'],
+        'filters' => [['field' => 'state', 'operator' => '=', 'value' => 'Lead state']],
+    ]],
+]);
+$conversation = service($rebuilt, [], new ArrayStore());
+$listed = $conversation->ask('show me the potential leads', $user);
+same('continuation: the first answer lists the leads of that state', 2, count($listed->rows));
+
+$again = $conversation->ask('include their contact numbers', $user);
+same('continuation: the follow-up is a continuation', 'follow_up', $again->meta['routed_by'] ?? '');
+same('continuation: the filter of the answer it continues is kept', 'potential', (string) ($again->meta['plan']['filters'][0]['value'] ?? ''));
+same('continuation: the rows of the answer it continues are still there', 2, count($again->rows));
+check('continuation: the column the question asks for is added', isset($again->rows[0]['phone']), json_encode($again->rows));
+
+// ─── "include" spelled right is still a continuation ─────────────────────────
+// The typo table holds "includ" for "include". Repairing it as a substring
+// turned "include" into "includee", and the question stopped being a
+// continuation of the answer before it.
+$spelled = new SequencedLlm([
+    ['intent' => 'data', 'plan' => ['dataset' => 'leads', 'dimensions' => ['name']]],
+    ['intent' => 'report'],
+]);
+$conversation = service($spelled, [], new ArrayStore());
+$conversation->ask('show me the leads', $user);
+$named = $conversation->ask('include the name', $user);
+same('continuation: a spelled "include" is still a continuation', 'follow_up', $named->meta['routed_by'] ?? '');
+same('continuation: the answer it continues is still the same', 'leads', (string) ($named->meta['plan']['dataset'] ?? ''));
+
 // ─── "all users" is a record list, not a count per category ───────────────────
 $namePack = new DomainPack([[
     'name' => 'x',
