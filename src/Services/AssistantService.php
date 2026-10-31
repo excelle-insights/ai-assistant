@@ -65,6 +65,7 @@ final class AssistantService
     private ?ActionHandlerInterface $actions;
     private ?ReportService $reports;
     private ?CodeIndexService $code;
+    private ?QueryLibraryService $queries;
     private SchemaPolicy $policy;
 
     /** @var array<string,callable> */
@@ -92,6 +93,7 @@ final class AssistantService
         array $hooks = [],
         array $options = [],
         ?CodeIndexService $code = null,
+        ?QueryLibraryService $queries = null,
     ) {
         $this->llm = $llm ?? LlmFactory::make();
         $this->conversations = $conversations;
@@ -104,6 +106,7 @@ final class AssistantService
         $this->reports = $reports;
         $this->policy = $policy ?? new SchemaPolicy();
         $this->code = $code;
+        $this->queries = $queries;
         $this->hooks = array_filter($hooks, 'is_callable');
         $this->model = (string) ($options['model'] ?? Config::string('llm.model', ''));
         $this->temperature = isset($options['temperature']) ? (float) $options['temperature'] : null;
@@ -361,6 +364,11 @@ final class AssistantService
             $lines[] = $known;
         }
 
+        $reports = $this->knownReports($request);
+        if ($reports !== '') {
+            $lines[] = $reports;
+        }
+
         return implode("\n", $lines);
     }
 
@@ -382,6 +390,43 @@ final class AssistantService
         } catch (\Throwable) {
             return '';
         }
+    }
+
+    /**
+     * The reports this CRM already runs, for the questions they answer.
+     *
+     * A named report is the business's own way of doing the calculation, so
+     * the plan should follow its rules instead of inventing its own.
+     */
+    private function knownReports(AskRequest $request): string
+    {
+        if ($this->queries === null) {
+            return '';
+        }
+        try {
+            return $this->queries->promptSection($request->user->tenantId, $request->question, 2);
+        } catch (\Throwable) {
+            return '';
+        }
+    }
+
+    /**
+     * The stored report that answers this question, if there is one.
+     *
+     * @return array<string,mixed>|null
+     */
+    private function matchedReport(AskRequest $request): ?array
+    {
+        if ($this->queries === null) {
+            return null;
+        }
+        try {
+            $matches = $this->queries->match($request->user->tenantId, $request->question, 1);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return $matches[0] ?? null;
     }
 
     /** Today in the host's timezone, phrased so the model cannot misread it. */
@@ -538,12 +583,23 @@ final class AssistantService
 
         $export = $this->exportFor($request, $result, $compiled);
 
+        $citations = $this->dataCitations($compiled, $result);
+        $report = $this->matchedReport($request);
+        if ($report !== null) {
+            $citations[] = new Citation(
+                'query',
+                (string) $report['name'],
+                (string) $report['id'],
+                ['module' => (string) ($report['module'] ?? '')]
+            );
+        }
+
         return new Answer(
             text: $this->describeRows($request, $result, $compiled) . (string) ($export['text'] ?? ''),
             intent: 'data',
             rows: $result->rows,
             chart: $wantsChart ? $this->chartFor($result, $chartType) : [],
-            citations: $this->dataCitations($compiled, $result),
+            citations: $citations,
             suggestions: (array) ($export['suggestions'] ?? []),
             sql: $this->mayUseRawSql($user) ? (string) ($compiled['sql'] ?? '') : null,
             appliedFilters: (array) ($compiled['applied_filters'] ?? []),
@@ -553,6 +609,11 @@ final class AssistantService
                 'truncated' => $result->truncated,
                 'source' => $result->source,
                 'export' => $export,
+                'report' => $report === null ? null : [
+                    'id' => (int) ($report['id'] ?? 0),
+                    'name' => (string) ($report['name'] ?? ''),
+                    'module' => (string) ($report['module'] ?? ''),
+                ],
             ]
         );
     }

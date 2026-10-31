@@ -227,6 +227,14 @@ function apiDatabase(): PDO
         statements INTEGER DEFAULT 0, meta_json TEXT, updated_by TEXT, created_at TEXT, updated_at TEXT)');
     $pdo->exec('CREATE UNIQUE INDEX `' . tbl('code_file_path') . '` ON `' . tbl('code_files') . '` (company_id, path)');
 
+    // Same shape as 20261026122000_create_ai_assistant_queries_table.php.
+    $pdo->exec('CREATE TABLE `' . tbl('queries') . '` (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, company_id INTEGER DEFAULT 0, name TEXT,
+        module TEXT DEFAULT "", purpose TEXT DEFAULT "", sql TEXT, tables TEXT, source_file TEXT DEFAULT "",
+        description TEXT, business_description TEXT, status TEXT DEFAULT "proposed", meta_json TEXT,
+        updated_by TEXT, created_at TEXT, updated_at TEXT)');
+    $pdo->exec('CREATE UNIQUE INDEX `' . tbl('query_name') . '` ON `' . tbl('queries') . '` (company_id, name)');
+
     // The host's own table, which is what the assistant is asked about.
     $pdo->exec('CREATE TABLE orders (
         id INTEGER PRIMARY KEY, company_id INTEGER, customer_id INTEGER, status TEXT,
@@ -1007,6 +1015,21 @@ check('handle: code.queries found the query', ($codeQueries['items'] ?? []) !== 
 
 @unlink($codeDir . '/orders_list.php');
 @rmdir($codeDir);
+
+// ─── the query library ────────────────────────────────────────────────────────
+
+$querySave = $api->handle('query.save', ['tenant_id' => 7, 'query' => [
+    'name' => 'Orders total',
+    'module' => 'Orders',
+    'business_description' => 'The total value of the orders.',
+    'status' => 'active',
+]]);
+okAnswer('handle: query.save', $querySave);
+same('handle: the query was stored', 'Orders total', $querySave['query']['name'] ?? '');
+okAnswer('handle: query.list', $api->handle('query.list', ['tenant_id' => 7]));
+okAnswer('handle: query.get', $api->handle('query.get', ['tenant_id' => 7, 'id' => $querySave['query']['id']]));
+okAnswer('handle: query.harvest', $api->handle('query.harvest', ['tenant_id' => 7]));
+okAnswer('handle: query.delete', $api->handle('query.delete', ['tenant_id' => 7, 'id' => $querySave['query']['id']]));
 
 $noUser = $api->handle('export.create', ['data' => $rows, 'format' => 'csv']);
 badAnswer('handle: needs a user where one is required', $noUser, 'user');

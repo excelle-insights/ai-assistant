@@ -158,6 +158,37 @@ final class CodeIndexService
     }
 
     /**
+     * The statements the index holds, for the query library to harvest.
+     *
+     * @return array<int,array<string,mixed>>
+     */
+    public function statements(int $companyId, int $limit = 500): array
+    {
+        $out = [];
+        foreach ($this->codeEntries($companyId) as $entry) {
+            if (count($out) >= max(1, $limit)) {
+                break;
+            }
+            $meta = (array) ($entry['metadata'] ?? []);
+            $sql = trim((string) ($meta['sql'] ?? ''));
+            if ($sql === '') {
+                continue;
+            }
+            $out[] = [
+                'sql' => $sql,
+                'file' => (string) ($meta['file'] ?? ''),
+                'module' => (string) ($meta['module'] ?? ''),
+                'function' => (string) ($meta['function'] ?? ''),
+                'tables' => array_values((array) ($meta['tables'] ?? [])),
+                'joins' => array_values((array) ($meta['joins'] ?? [])),
+                'where' => array_values((array) ($meta['where'] ?? [])),
+            ];
+        }
+
+        return $out;
+    }
+
+    /**
      * The queries the CRM already runs that match a question.
      *
      * @return array<int,array<string,mixed>>

@@ -24,6 +24,7 @@ use ExcelleInsights\AiAssistant\Dto\UserContext;
 use ExcelleInsights\AiAssistant\Services\AssistantService;
 use ExcelleInsights\AiAssistant\Services\ChartService;
 use ExcelleInsights\AiAssistant\Services\QueryCompiler;
+use ExcelleInsights\AiAssistant\Services\QueryLibraryService;
 use ExcelleInsights\AiAssistant\Services\SqlQueryRunner;
 use ExcelleInsights\AiAssistant\Support\Config;
 use ExcelleInsights\AiAssistant\Support\DomainPack;
@@ -389,6 +390,52 @@ $grouped = (new AssistantService(
     hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
 ))->ask('how many orders per status?', $user);
 same('shape: "per" keeps the grouping', 2, count($grouped->rows));
+
+// ─── the named report the CRM already runs ───────────────────────────────────
+
+$pdo->exec('CREATE TABLE `aiask_queries` (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, company_id INTEGER NOT NULL DEFAULT 0, name TEXT,
+    module TEXT DEFAULT "", purpose TEXT DEFAULT "", sql TEXT, tables TEXT, source_file TEXT DEFAULT "",
+    description TEXT, business_description TEXT, status TEXT DEFAULT "proposed", meta_json TEXT,
+    updated_by TEXT, created_at TEXT, updated_at TEXT)');
+$pdo->exec('CREATE UNIQUE INDEX `aiask_query_name` ON `aiask_queries` (company_id, name)');
+
+$library = new QueryLibraryService($pdo);
+$library->save(7, [
+    'name' => 'Orders total',
+    'module' => 'Orders',
+    'business_description' => 'The total value of the orders, counting the finished ones only.',
+    'status' => QueryLibraryService::STATUS_ACTIVE,
+]);
+
+$reportLlm = new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records']]]);
+$withReport = (new AssistantService(
+    llm: $reportLlm,
+    pack: $pack,
+    compiler: $compiler,
+    queries: $library,
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('what is the orders total?', $user);
+
+$routerPrompt = (string) ($reportLlm->messages[0]['content'] ?? '');
+check('report: the router was told about the stored report', str_contains($routerPrompt, 'Named reports this CRM already runs'), $routerPrompt);
+check('report: it carries what the report calculates', str_contains($routerPrompt, 'It calculates:'), $routerPrompt);
+same('report: the answer names it', 'Orders total', $withReport->meta['report']['name'] ?? '');
+$reportCitations = array_filter(
+    (array) $withReport->citations,
+    static fn ($citation): bool => (string) ($citation->label ?? '') === 'Orders total'
+);
+check('report: the answer cites it', $reportCitations !== [], json_encode($withReport->citations));
+
+// Another company must not be offered this report.
+$otherReport = (new AssistantService(
+    llm: new ScriptedLlm(['intent' => 'data', 'plan' => ['dataset' => 'orders', 'metrics' => ['records']]]),
+    pack: $pack,
+    compiler: $compiler,
+    queries: $library,
+    hooks: ['rows' => new SqlQueryRunner(sqlitePdo())],
+))->ask('what is the orders total?', new UserContext('u9', 9, 'web', 'thread-9', []));
+same('report: another company is not offered it', null, $otherReport->meta['report'] ?? null);
 
 // ─── scope the model never sees ───────────────────────────────────────────────
 $perms = new ScopedPermissions('customer_id = 42');

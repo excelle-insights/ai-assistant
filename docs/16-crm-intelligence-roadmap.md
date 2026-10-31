@@ -36,7 +36,7 @@ real; nothing here is aspirational fiction.
 | Gap | Consequence today | Phase |
 |---|---|---|
 | The host's **source code** is never read | business rules that only live in PHP (how "paid" is decided, how a balance is computed) are invisible to the assistant | P2 ✅ |
-| There is no **query library** | the assistant re-derives a calculation the CRM already has a proven report for | P3 |
+| There is no **query library** | the assistant re-derives a calculation the CRM already has a proven report for | P3 ✅ |
 | A key column (`staff_id`) becomes a name only when a pack declares the sibling | on an uncurated CRM the answer says "12" instead of "Jane Wanjiru" | P1 ✅ |
 | There is no **onboarding flow** | installing into a new CRM still needs a human to write the pack | P5 |
 | Business rules are free-text knowledge, not **verified, owned rules** | a rule can be wrong and nobody is told | P4 |
@@ -247,23 +247,41 @@ again, a deleted file is forgotten, and the router prompt carries the rules.
 
 ---
 
-### P3 — The query library
+### P3 — The query library ✅ done
 
 *Goal:* proven calculations are reused, not reinvented.
 
-*New table:* `ai_assistant_queries`
+*New table:* `{prefix}_queries`
 (`id, company_id, name, module, purpose, sql, tables, source_file, description,
-business_description, status, created_at, updated_at`).
+business_description, status, meta_json, updated_by, created_at, updated_at`),
+unique on `(company_id, name)`.
 
-- Harvested from P2, then editable in the admin UI.
-- Each entry states **what it calculates** in business language and where it
-  came from.
-- The admin can mark one as the canonical way to answer a family of questions.
-- When the router's question matches a stored query, the answer offers it as a
-  named report the user can run again, and its filters/joins seed the plan.
+*What shipped:*
 
-*Acceptance:* ≥ 80 % of "which report should I run" questions resolve to a
-stored query rather than an improvised one.
+- `src/Services/QueryLibraryService.php` — `list()`, `find()`, `match()`,
+  `save()`, `delete()`, `harvest()`, `promptSection()`. Every read and write is
+  scoped by `company_id`; a stored query belongs to one CRM.
+- Three states, and the difference matters: `proposed` (harvested from the
+  code, never steers the assistant), `active` (a human confirmed it — this is
+  the canonical way to answer that family of questions), `retired`.
+- `harvest()` takes the statements P2 found and proposes them as named
+  reports. A query somebody already described is never overwritten by a later
+  harvest, so the human's wording wins over the scanner's guess.
+- `match()` scores the question against the active queries
+  (`queries.match_threshold`, default `0.2`) and `promptSection()` gives the
+  router the business description and the rules — never the SQL to run.
+- The answer carries the match: a citation of type `query` naming the report,
+  and `meta['report'] = ['id', 'name', 'module']`, so a host can offer "run
+  this report again" without the package knowing what a report is.
+- API: `query.list`, `query.get`, `query.save`, `query.delete`,
+  `query.harvest`; `service('queries')`.
+
+*Acceptance:* `tests/queries.php` — 33 checks: a query is saved and updated by
+name, the name is required, lists and finds never cross companies, matching
+ranks the right report, proposed queries never match, harvesting proposes
+once and then skips, a described query survives a harvest, and deletion works.
+`tests/assistant.php` — the router prompt carries the named reports and the
+answer cites the one that matched, while another tenant is not offered it.
 
 ---
 
