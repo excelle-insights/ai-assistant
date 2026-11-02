@@ -503,6 +503,104 @@ class KnowledgeService implements KnowledgeRetrieverInterface
     }
 
     /**
+     * One page of the corpus, for a list that must not read the whole table.
+     *
+     * `list()` is the retrieval-sized read. An admin surface grows with the
+     * corpus, so it asks for a window instead and gets back the two counts that
+     * label it: how much there is, and how much matches the filter it applied.
+     *
+     * @param array<string,mixed> $options length, start, search, status, category, sort, direction
+     * @return array{items:list<array<string,mixed>>, total:int, filtered:int, start:int, length:int}
+     */
+    public function paginate(int $companyId, array $options = []): array
+    {
+        $table = $this->table();
+        $tenant = Db::identifier($this->tenantColumn());
+
+        $length = max(1, min(200, (int) ($options['length'] ?? 25)));
+        $start = max(0, (int) ($options['start'] ?? 0));
+
+        $where = ["`{$tenant}` = :tenant"];
+        $bind = [':tenant' => $companyId];
+        $total = (int) $this->countRows($table, $where, $bind);
+
+        foreach (['status', 'category'] as $filter) {
+            $value = trim((string) ($options[$filter] ?? ''));
+            if ($value === '' || !$this->hasColumn($table, $filter)) {
+                continue;
+            }
+            $where[] = "`{$filter}` = :{$filter}";
+            $bind[":{$filter}"] = $value;
+        }
+
+        $search = trim((string) ($options['search'] ?? ''));
+        $searchColumns = $search === '' ? [] : $this->existing($table, ['title', 'content', 'category', 'source']);
+        if ($searchColumns !== []) {
+            // One placeholder per column: MySQL's native prepare rejects a named
+            // parameter bound twice, which SQLite silently tolerates.
+            $clauses = [];
+            $needle = '%' . Db::escapeLike($search) . '%';
+            foreach ($searchColumns as $index => $column) {
+                $clauses[] = "`{$column}` LIKE :search{$index}";
+                $bind[':search' . $index] = $needle;
+            }
+            $where[] = '(' . implode(' OR ', $clauses) . ')';
+        }
+
+        $filtered = count($where) === 1
+            ? $total
+            : (int) $this->countRows($table, $where, $bind);
+
+        $select = $this->existing($table, [
+            'id', 'title', 'content', 'category', 'source', 'status', 'scope', 'scope_key', 'doc_id',
+            'content_hash', 'token_count', 'pinned', 'updated_by', 'metadata_json', 'created_at', 'updated_at',
+        ]);
+        $sort = $this->sortColumn((string) ($options['sort'] ?? ''), $table);
+        $order = '`' . $sort . '` ' . (strtolower((string) ($options['direction'] ?? '')) === 'asc' ? 'ASC' : 'DESC');
+        if ($sort !== 'id' && $this->hasColumn($table, 'id')) {
+            $order .= ', `id` DESC';
+        }
+
+        $stmt = $this->connection()->prepare(
+            'SELECT `' . implode('`, `', array_map(static fn (string $c): string => Db::identifier($c), $select)) . '`'
+            . ' FROM `' . $table . '` WHERE ' . implode(' AND ', $where)
+            . ' ORDER BY ' . $order
+            . ' LIMIT ' . $length . ' OFFSET ' . $start
+        );
+        $stmt->execute($bind);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        return [
+            'items' => array_map(fn (array $row): array => $this->publicRow($row), $rows),
+            'total' => $total,
+            'filtered' => $filtered,
+            'start' => $start,
+            'length' => $length,
+        ];
+    }
+
+    /** COUNT(*) over the conditions a page was read with. */
+    private function countRows(string $table, array $where, array $bind): int
+    {
+        $stmt = $this->connection()->prepare(
+            'SELECT COUNT(*) FROM `' . $table . '` WHERE ' . implode(' AND ', $where)
+        );
+        $stmt->execute($bind);
+        return (int) $stmt->fetchColumn();
+    }
+
+    /**
+     * The column a list may sort by. A name the install does not have — and the
+     * body text, which would sort a corpus by its first paragraph — falls back to
+     * the newest-first order the list is built around.
+     */
+    private function sortColumn(string $requested, string $table): string
+    {
+        $allowed = $this->existing($table, ['updated_at', 'created_at', 'title', 'category', 'source', 'status', 'id']);
+        return in_array($requested, $allowed, true) ? $requested : 'updated_at';
+    }
+
+    /**
      * Entries of the given categories, newest first.
      *
      * A rule base is a named corner of the knowledge table, so it asks for its
@@ -557,6 +655,30 @@ class KnowledgeService implements KnowledgeRetrieverInterface
         );
         $stmt->execute([':id' => $id, ':tenant' => $companyId]);
         return $stmt->rowCount() > 0;
+    }
+
+    /**
+     * Empty a company's knowledge base in one statement, or one corner of it.
+     *
+     * The tenant is never optional, so a host cannot clear another company's
+     * corpus by omission; filters narrow the wipe to a category, source or status.
+     *
+     * @param array<string,mixed> $filters category, source, status
+     * @return int rows deleted
+     */
+    public function clear(int $companyId, array $filters = []): int
+    {
+        $table = $this->table();
+        $where = [$this->tenantColumn() => $companyId];
+        foreach (['category', 'source', 'status'] as $filter) {
+            $value = trim((string) ($filters[$filter] ?? ''));
+            if ($value === '' || !$this->hasColumn($table, $filter)) {
+                continue;
+            }
+            $where[$filter] = $value;
+        }
+
+        return Db::deleteWhere($this->connection(), $table, $where);
     }
 
     /**
