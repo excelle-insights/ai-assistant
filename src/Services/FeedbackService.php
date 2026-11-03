@@ -52,7 +52,10 @@ class FeedbackService
         $payload = $this->normaliseSubmit($target, $rating, $reason, $comment, $ctx);
         $payload = $this->enrichFromMessages($payload);
         try {
-            return $this->insertFeedback($payload);
+            $voted = $this->pendingFeedbackId($payload);
+            return $voted === null
+                ? $this->insertFeedback($payload)
+                : $this->updateFeedback($voted, $payload);
         } catch (Throwable $e) {
             $this->report($e);
             return 0;
@@ -306,6 +309,55 @@ class FeedbackService
             static fn ($v): bool => $v !== null,
         );
         return Db::insert($this->pdo, $table, $values);
+    }
+
+    /**
+     * The vote already waiting in the queue for this answer by this user, if any.
+     * A thumbs-up that turns into a thumbs-down must change that row, not add a
+     * second one — the admin count of "helpful" is only as good as one-vote-per-answer.
+     * Rows an admin has already acted on are left alone.
+     *
+     * @param array<string,mixed> $payload
+     */
+    protected function pendingFeedbackId(array $payload): ?int
+    {
+        if ($this->pdo === null || $payload['message_id'] === null || $payload['user_id'] === null) {
+            return null;
+        }
+        try {
+            $table = Db::requireTable($this->pdo, 'feedback');
+            $stmt = $this->pdo->prepare(
+                'SELECT `id` FROM `' . $table . '`'
+                . ' WHERE `company_id` = :c AND `message_id` = :m AND `user_id` = :u AND `status` = \'pending\''
+                . ' ORDER BY `created_at` DESC LIMIT 1'
+            );
+            $stmt->execute([
+                'c' => (int) $payload['company_id'],
+                'm' => $payload['message_id'],
+                'u' => $payload['user_id'],
+            ]);
+            $id = $stmt->fetchColumn();
+            return $id === false ? null : (int) $id;
+        } catch (Throwable $e) {
+            $this->report($e);
+            return null;
+        }
+    }
+
+    /** @param array<string,mixed> $payload */
+    protected function updateFeedback(int $id, array $payload): int|string
+    {
+        if ($this->pdo === null) {
+            return 0;
+        }
+        $table = Db::requireTable($this->pdo, 'feedback');
+        $values = array_intersect_key(
+            $payload,
+            array_flip(['rating', 'reason', 'comment', 'question', 'answer', 'conversation_id']),
+        );
+        $values['updated_at'] = Db::now();
+        Db::updateWhere($this->pdo, $table, $values, ['id' => $id], '');
+        return $id;
     }
 
     /**

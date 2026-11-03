@@ -206,6 +206,14 @@ $store->append($roles, ['role' => 'assistant', 'content' => 'fourth']);
 same('history: non-chat roles are skipped', ['first', 'injected', 'fourth'], array_column($store->history($roles, 10), 'content'));
 same('transcript: keeps every role', 4, count($store->transcript($roles)['messages']));
 
+// The assistant pre-allocates the answer row's id so the host can rate exactly it.
+$sided = $store->touch(7, 'web', 'sided-id');
+$store->append($sided, ['id' => 'answer-row-1', 'role' => 'assistant', 'content' => 'two orders']);
+$store->append($sided, ['role' => 'user', 'content' => 'and last month?']);
+$rowIds = $pdo->query('SELECT id FROM aitest_messages WHERE conversation_id = ' . $pdo->quote($sided) . ' ORDER BY seq')->fetchAll(PDO::FETCH_COLUMN);
+same('append: a supplied id is kept', 'answer-row-1', (string) ($rowIds[0] ?? ''));
+check('append: without one an id is generated', count($rowIds) === 2 && (string) $rowIds[1] !== '' && $rowIds[1] !== 'answer-row-1');
+
 check('delete: removes the thread', $store->delete($conv));
 same('delete: gone', null, $store->getConversation($conv));
 same('delete: messages gone too', 0, (int) $pdo->query('SELECT COUNT(*) FROM aitest_messages WHERE conversation_id = ' . $pdo->quote($conv))->fetchColumn());

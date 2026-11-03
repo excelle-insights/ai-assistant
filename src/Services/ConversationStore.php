@@ -91,7 +91,9 @@ final class ConversationStore implements ConversationStoreInterface
     /**
      * Store one turn.
      *
-     * @param array<string,mixed> $turn role, content, content_type, intent, citations,
+     * @param array<string,mixed> $turn id (optional — the caller can pre-allocate it so it
+     *                                   knows the row before it lands), role, content,
+     *                                   content_type, intent, citations,
      *                                   rows, chart, applied_filters, sql, model,
      *                                   tokens_in, tokens_out, latency_ms, status, error
      * @return int the turn number stored (seq), 0 when the thread is unknown
@@ -116,8 +118,9 @@ final class ConversationStore implements ConversationStoreInterface
             }
         }
 
+        $supplied = trim((string) ($turn['id'] ?? ''));
         $row = [
-            'id' => Db::uuid(),
+            'id' => $supplied !== '' ? $supplied : Db::uuid(),
             'conversation_id' => $conversationId,
             'company_id' => (int) ($conversation['company_id'] ?? 0),
             'user_id' => isset($turn['user_id']) ? (string) $turn['user_id'] : ($conversation['user_id'] ?? null),

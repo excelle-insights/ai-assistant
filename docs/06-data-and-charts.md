@@ -98,6 +98,8 @@ array, or your own object (see
 | `applied_filters` | what the answer was actually scoped by, including the tenant filter |
 | `pending_action` | set when the answer is a proposal awaiting confirmation ([09](09-actions-and-outbox.md)) |
 | `meta.routed_by` | `hint` (you passed `options.intent`), `router` (the model chose), `guessed` (words decided it), `nothing_connected` — the last two are what to look at when answers are wrong |
+| `meta.conversation_id` | the thread the answer was stored in, `null` when history is off |
+| `meta.message_id` | the stored answer row — hand it to `feedback.submit` so a thumbs-up rates exactly this answer ([11](11-governance.md)) |
 
 `meta` also carries per-path extras: `columns`/`truncated`/`source`/`export` on data
 answers, `retrieved` on knowledge answers, `report` on report runs.

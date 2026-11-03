@@ -129,6 +129,14 @@ $api->handle('feedback.submit', [
 If `message_id` is present and `question`/`answer` are not, the service fills
 them from `{prefix}_messages` when that table exists. Rows land as `pending`.
 
+Every answer's `meta.message_id` is that message row, so a thumbs button next to
+the answer has something precise to rate — no need for the user to open a
+feedback page. `chat()` returns it; a re-vote by the same user on the same
+message updates the pending row instead of adding a second one, so
+`feedbackSummary()`'s helpful rate stays one-vote-per-answer. Rows an admin has
+already accepted, rejected or converted are left as they are, and another user's
+vote on the same answer is its own row.
+
 The admin queue is on the service (not the `handle()` map):
 
 ```php

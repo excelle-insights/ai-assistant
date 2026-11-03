@@ -18,6 +18,7 @@ use ExcelleInsights\AiAssistant\Dto\QueryResult;
 use ExcelleInsights\AiAssistant\Dto\UserContext;
 use ExcelleInsights\AiAssistant\Support\Config;
 use ExcelleInsights\AiAssistant\Support\DateRange;
+use ExcelleInsights\AiAssistant\Support\Db;
 use ExcelleInsights\AiAssistant\Support\DomainPack;
 use ExcelleInsights\AiAssistant\Support\LlmFactory;
 use ExcelleInsights\AiAssistant\Support\SchemaPolicy;
@@ -198,9 +199,9 @@ final class AssistantService
             default => $this->answerSmalltalk($request, $history),
         };
 
-        $this->remember($request, $conversationId, $text, $answer, $startedAt);
+        $messageId = $this->remember($request, $conversationId, $text, $answer, $startedAt);
 
-        return $this->withMeta($answer, $request, $conversationId, $intent, $routedBy);
+        return $this->withMeta($answer, $request, $conversationId, $intent, $routedBy, $messageId);
     }
 
     /**
@@ -3623,18 +3624,27 @@ final class AssistantService
     /**
      * Store the turn, then audit it. Both are best-effort: a history write must
      * not be the reason an answer fails.
+     *
+     * @return string|null the id of the stored answer row, so the host can rate
+     *                     exactly this answer, or null when nothing was stored
      */
-    private function remember(AskRequest $request, string $conversationId, string $question, Answer $answer, float $startedAt): void
+    private function remember(AskRequest $request, string $conversationId, string $question, Answer $answer, float $startedAt): ?string
     {
+        $messageId = null;
         if ($this->conversations !== null && $conversationId !== '') {
             $storeRows = max(0, Config::int('limits.store_rows', 50));
+            $stored = 0;
+            // Pre-allocate the answer row's id: the turn lands in the store, but the
+            // host only sees the Answer object, and a thumbs-up needs to name the row.
+            $pending = Db::uuid();
             try {
                 $this->conversations->append($conversationId, [
                     'role' => 'user',
                     'content' => $question,
                     'intent' => $answer->intent,
                 ]);
-                $this->conversations->append($conversationId, [
+                $stored = $this->conversations->append($conversationId, [
+                    'id' => $pending,
                     'role' => 'assistant',
                     'content' => $answer->text,
                     'intent' => $answer->intent,
@@ -3651,7 +3661,9 @@ final class AssistantService
                 ]);
             } catch (\Throwable) {
                 // keep the answer
+                $pending = '';
             }
+            $messageId = $stored > 0 && $pending !== '' ? $pending : null;
         }
 
         $this->audit('assistant.answered', [
@@ -3666,6 +3678,8 @@ final class AssistantService
             'conversation_id' => $conversationId,
             'latency_ms' => (int) round((microtime(true) - $startedAt) * 1000),
         ]);
+
+        return $messageId;
     }
 
     /** @param array<string,mixed> $detail */
@@ -3682,10 +3696,13 @@ final class AssistantService
     }
 
     /** @return array<string,mixed> */
-    private function withMeta(Answer $answer, AskRequest $request, string $conversationId, string $intent, string $routedBy = 'router'): Answer
+    private function withMeta(Answer $answer, AskRequest $request, string $conversationId, string $intent, string $routedBy = 'router', ?string $messageId = null): Answer
     {
         $meta = $answer->meta + [
             'conversation_id' => $conversationId ?: null,
+            // The stored answer row, so the host rates this exact message instead of
+            // the whole thread. Null when history is off or the write failed.
+            'message_id' => $messageId,
             'routed_by' => $routedBy,
             'channel' => $request->user->channel,
         ];
