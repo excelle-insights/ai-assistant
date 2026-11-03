@@ -499,6 +499,14 @@ same('chat: data intent', 'data', $chat['answer']['intent'] ?? null);
 same('chat: tenant scope applied', 2, (int) ($chat['answer']['rows'][0]['records'] ?? 0));
 check('chat: plain text offered', str_contains((string) ($chat['answer']['plain'] ?? ''), 'records'), (string) ($chat['answer']['plain'] ?? ''));
 check('chat: conversation opened', ($chat['answer']['meta']['conversation_id'] ?? null) !== null, json_encode($chat['answer']['meta'] ?? []));
+$answerRow = (string) ($chat['answer']['meta']['message_id'] ?? '');
+check('chat: the answer names its stored row', $answerRow !== '', json_encode($chat['answer']['meta'] ?? []));
+$thread = $api->getConversation((string) ($chat['answer']['meta']['conversation_id'] ?? ''), 20);
+check(
+    'chat: that row is the answer in the transcript',
+    in_array($answerRow, array_column((array) ($thread['turns']['messages'] ?? []), 'id'), true),
+    json_encode($thread['turns']['messages'] ?? [])
+);
 
 $other = $api->chat('how many orders', apiUser(['tenant_id' => 9]));
 okAnswer('chat: another tenant asks', $other);
@@ -851,6 +859,26 @@ okAnswer('feedback: aggregated', $agg);
 $promoted = $api->feedbackToKnowledge($fbId);
 okAnswer('feedback: promoted to knowledge', $promoted);
 same('feedback: written into knowledge', true, $promoted['result']['ok'] ?? false);
+
+// An inline thumbs-up that becomes a thumbs-down must not leave two rows behind:
+// the admin's helpful-rate is only honest at one vote per answer per user.
+$inline = ['message_id' => 'msg-inline', 'conversation_id' => 'conv-inline', 'question' => 'how many orders', 'answer' => '2'];
+okAnswer('feedback: first inline vote', $api->submitFeedback($inline, 'up', null, null, apiUser()));
+okAnswer('feedback: changed mind', $api->submitFeedback($inline + ['reason' => 'wrong month'], 'down', 'wrong month', 'it counted last year', apiUser()));
+$mine = array_values(array_filter(
+    (array) ($api->feedbackList(7, 'all', 50)['items'] ?? []),
+    static fn (array $row): bool => ($row['message_id'] ?? '') === 'msg-inline'
+));
+same('feedback: a re-vote replaces the pending row', 1, count($mine));
+same('feedback: the new rating wins', 'down', (string) ($mine[0]['rating'] ?? ''));
+same('feedback: the reason is stored', 'wrong month', (string) ($mine[0]['reason'] ?? ''));
+// A second user on the same answer keeps their own row.
+okAnswer('feedback: another user votes', $api->submitFeedback($inline, 'up', null, null, apiUser(['user_id' => 'u2'])));
+$shared = array_values(array_filter(
+    (array) ($api->feedbackList(7, 'all', 50)['items'] ?? []),
+    static fn (array $row): bool => ($row['message_id'] ?? '') === 'msg-inline'
+));
+same('feedback: each user has one row', 2, count($shared));
 
 $today = $api->usageToday(7);
 okAnswer('usage: today', $today);
